@@ -1,8 +1,8 @@
 {
-  "name": "nos2x",
-  "description": "Nostr Signer Extension",
+  "name": "nos2bch",
+  "description": "Nostr signer extension with BCH tipping",
   "version": "2.5.2",
-  "homepage_url": "https://github.com/fiatjaf/nos2x",
+  "homepage_url": "https://github.com/bastiancarmy/nos2bch",
   "manifest_version": 3,
   "icons": {
     "16": "icons/16x16.png",
@@ -12,23 +12,22 @@
   },
   "options_page": "options.html",
   "background": {
-    "service_worker": "background.build.js"
+    "service_worker": "background.js"
   },
   "action": {
-    "default_title": "nos2x",
+    "default_title": "nos2bch",
     "default_popup": "popup.html"
   },
   "content_scripts": [
     {
       "run_at": "document_end",
       "matches": ["<all_urls>"],
-      "js": ["content-script.build.js"],
+      "js": ["content-script.js"],
       "all_frames": true
     }
   ],
-
   "permissions": ["storage", "activeTab", "windows"],
-
+  "host_permissions": ["https://api.fullstack.cash/*", "https://iris.to/*"],
   "optional_permissions": ["notifications"],
   "web_accessible_resources": [
     {

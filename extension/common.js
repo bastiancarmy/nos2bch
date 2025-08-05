@@ -23,12 +23,12 @@ function matchConditions(conditions, event) {
 }
 
 export async function getPermissionStatus(host, type, event) {
-  let {policies} = await browser.storage.local.get('policies')
+  const { policies } = await browser.storage.local.get('policies')
 
-  let answers = [true, false]
+  const answers = [true, false]
   for (let i = 0; i < answers.length; i++) {
-    let accept = answers[i]
-    let {conditions} = policies?.[host]?.[accept]?.[type] || {}
+    const accept = answers[i]
+    const { conditions } = policies?.[host]?.[accept]?.[type] || {}
 
     if (conditions) {
       if (type === 'signEvent') {
@@ -49,14 +49,14 @@ export async function getPermissionStatus(host, type, event) {
 }
 
 export async function updatePermission(host, type, accept, conditions) {
-  let {policies = {}} = await browser.storage.local.get('policies')
+  const { policies = {} } = await browser.storage.local.get('policies')
 
   // if the new conditions is "match everything", override the previous
   if (Object.keys(conditions).length === 0) {
     conditions = {}
   } else {
     // if we already had a policy for this, merge the conditions
-    let existingConditions = policies[host]?.[accept]?.[type]?.conditions
+    const existingConditions = policies[host]?.[accept]?.[type]?.conditions
     if (existingConditions) {
       if (existingConditions.kinds && conditions.kinds) {
         Object.keys(existingConditions.kinds).forEach(kind => {
@@ -67,8 +67,8 @@ export async function updatePermission(host, type, accept, conditions) {
   }
 
   // if we have a reverse policy (accept / reject) that is exactly equal to this, remove it
-  let other = !accept
-  let reverse = policies?.[host]?.[other]?.[type]
+  const other = !accept
+  const reverse = policies?.[host]?.[other]?.[type]
   if (
     reverse &&
     JSON.stringify(reverse.conditions) === JSON.stringify(conditions)
@@ -84,19 +84,19 @@ export async function updatePermission(host, type, accept, conditions) {
     created_at: Math.round(Date.now() / 1000)
   }
 
-  browser.storage.local.set({policies})
+  browser.storage.local.set({ policies })
 }
 
 export async function removePermissions(host, accept, type) {
-  let {policies = {}} = await browser.storage.local.get('policies')
+  const { policies = {} } = await browser.storage.local.get('policies')
   delete policies[host]?.[accept]?.[type]
-  browser.storage.local.set({policies})
+  browser.storage.local.set({ policies })
 }
 
 export async function showNotification(host, answer, type, params) {
-  let {notifications} = await browser.storage.local.get('notifications')
+  const { notifications } = await browser.storage.local.get('notifications')
   if (notifications) {
-    let action = answer ? 'allowed' : 'denied'
+    const action = answer ? 'allowed' : 'denied'
     browser.notifications.create(undefined, {
       type: 'basic',
       title: `${type} ${action} for ${host}`,

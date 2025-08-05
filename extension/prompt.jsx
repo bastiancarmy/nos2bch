@@ -1,15 +1,15 @@
 import browser from 'webextension-polyfill'
-import {createRoot} from 'react-dom/client'
+import { createRoot } from 'react-dom/client'
 import React from 'react'
 
-import {PERMISSION_NAMES} from './common'
+import { PERMISSION_NAMES } from './common'
 
 function Prompt() {
-  let qs = new URLSearchParams(location.search)
-  let id = qs.get('id')
-  let host = qs.get('host')
-  let type = qs.get('type')
-  let result = qs.get('result')
+  const qs = new URLSearchParams(location.search)
+  const id = qs.get('id')
+  const host = qs.get('host')
+  const type = qs.get('type')
+  const result = qs.get('result')
   let params, event
   try {
     params = JSON.parse(qs.get('params'))
@@ -21,15 +21,15 @@ function Prompt() {
 
   return (
     <>
-      <b style={{display: 'block', textAlign: 'center', fontSize: '200%'}}>
+      <b style={{ display: 'block', textAlign: 'center', fontSize: '200%' }}>
         {host}
       </b>{' '}
-      <p style={{margin: 0}}>
+      <p style={{ margin: 0 }}>
         is requesting your permission to <b>{PERMISSION_NAMES[type]}:</b>
       </p>
       {params && (
-        <div style={{width: '100%', maxHeight: '200px', overflowY: 'scroll'}}>
-          <p style={{margin: 0}}>now acting on</p>
+        <div style={{ width: '100%', maxHeight: '200px', overflowY: 'scroll' }}>
+          <p style={{ margin: 0 }}>now acting on</p>
           <pre
             style={{
               width: '100%',
@@ -42,8 +42,8 @@ function Prompt() {
         </div>
       )}
       {result && (
-        <div style={{width: '100%', maxHeight: '180px', overflowY: 'scroll'}}>
-          <p style={{margin: 0}}>result:</p>
+        <div style={{ width: '100%', maxHeight: '180px', overflowY: 'scroll' }}>
+          <p style={{ margin: 0 }}>result:</p>
           <pre
             style={{
               width: '100%',
@@ -65,7 +65,7 @@ function Prompt() {
         >
           {event?.kind === undefined && (
             <button
-              style={{marginTop: '5px'}}
+              style={{ marginTop: '5px' }}
               onClick={authorizeHandler(
                 true,
                 {} // store this and answer true forever
@@ -76,16 +76,16 @@ function Prompt() {
           )}
           {event?.kind !== undefined && (
             <button
-              style={{marginTop: '5px'}}
+              style={{ marginTop: '5px' }}
               onClick={authorizeHandler(
                 true,
-                {kinds: {[event.kind]: true}} // store and always answer true for all events that match this condition
+                { kinds: { [event.kind]: true } } // store and always answer true for all events that match this condition
               )}
             >
               authorize kind {event.kind} forever
             </button>
           )}
-          <button style={{marginTop: '5px'}} onClick={authorizeHandler(true)}>
+          <button style={{ marginTop: '5px' }} onClick={authorizeHandler(true)}>
             authorize just this
           </button>
         </div>
@@ -99,17 +99,17 @@ function Prompt() {
         >
           {event?.kind !== undefined ? (
             <button
-              style={{marginTop: '5px'}}
+              style={{ marginTop: '5px' }}
               onClick={authorizeHandler(
                 false,
-                {kinds: {[event.kind]: true}} // idem
+                { kinds: { [event.kind]: true } } // idem
               )}
             >
               reject kind {event.kind} forever
             </button>
           ) : (
             <button
-              style={{marginTop: '5px'}}
+              style={{ marginTop: '5px' }}
               onClick={authorizeHandler(
                 false,
                 {} // idem
@@ -118,7 +118,7 @@ function Prompt() {
               reject forever
             </button>
           )}
-          <button style={{marginTop: '5px'}} onClick={authorizeHandler(false)}>
+          <button style={{ marginTop: '5px' }} onClick={authorizeHandler(false)}>
             reject
           </button>
         </div>

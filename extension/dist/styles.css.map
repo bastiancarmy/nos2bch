@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "sources": ["../styles.css"],
+  "sourcesContent": ["body{color:#000;background-color:#fffffff8;font-size:.9em}h2{font-size:1.3em;margin:0 0 20px}.input-button-container{display:flex;align-items:center;justify-content:space-between;gap:10px}.modal{background-color:#fffffff8;width:100%;display:flex;justify-content:center;align-items:center;flex-direction:column}.modal-content{padding:0 20px;width:100%;font-size:1.3rem}form{display:flex;flex-direction:column;width:100%}label{margin-top:20px;font-size:20px;font-weight:700}.text{font-size:16px}.form-control{max-width:-webkit-fill-available;padding:10px;margin:5px 0;border:1px solid #ccc;border-radius:5px;font-size:16px}textarea.form-control{height:90px}.btn{border:none;padding:10px 20px;border-radius:5px;cursor:pointer}\n"],
+  "mappings": ";AAAA;AAAK,SAAM;AAAK,oBAAiB;AAAU,aAAU;AAAI;AAAC;AAAG,aAAU;AAAM,UAAO,EAAE,EAAE;AAAI;AAAC,CAAC;AAAuB,WAAQ;AAAK,eAAY;AAAO,mBAAgB;AAAc,OAAI;AAAI;AAAC,CAAC;AAAM,oBAAiB;AAAU,SAAM;AAAK,WAAQ;AAAK,mBAAgB;AAAO,eAAY;AAAO,kBAAe;AAAM;AAAC,CAAC;AAAc,WAAQ,EAAE;AAAK,SAAM;AAAK,aAAU;AAAM;AAAC;AAAK,WAAQ;AAAK,kBAAe;AAAO,SAAM;AAAI;AAAC;AAAM,cAAW;AAAK,aAAU;AAAK,eAAY;AAAG;AAAC,CAAC;AAAK,aAAU;AAAI;AAAC,CAAC;AAAa,aAAU;AAAuB,WAAQ;AAAK,UAAO,IAAI;AAAE,UAAO,IAAI,MAAM;AAAK,iBAAc;AAAI,aAAU;AAAI;AAAC,QAAQ,CAAvI;AAAqJ,UAAO;AAAI;AAAC,CAAC;AAAI,UAAO;AAAK,WAAQ,KAAK;AAAK,iBAAc;AAAI,UAAO;AAAO;",
+  "names": []
+}

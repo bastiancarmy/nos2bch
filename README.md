@@ -1,4 +1,4 @@
-# nos2x
+# nos2bch
 
 ### notes and other stuff signed by an extension
 
@@ -17,7 +17,7 @@ async window.nostr.nip44.encrypt(pubkey, plaintext): string // takes pubkey, pla
 async window.nostr.nip44.decrypt(pubkey, ciphertext): string // takes pubkey, ciphertext, returns plaintext as specified in nip-44
 ```
 
-This extension is Chromium-only. For a maintained Firefox fork, see [nos2x-fox](https://diegogurpegui.com/nos2x-fox/).
+This extension is Chromium-only. For a maintained Firefox fork, see [nos2bch-fox](https://diegogurpegui.com/nos2bch-fox/).
 
 ## Demo Video
 
@@ -25,15 +25,15 @@ https://user-images.githubusercontent.com/1653275/149637382-65d50a85-fe30-4259-b
 
 ## Install
 
-- [Chrome Extension](https://chrome.google.com/webstore/detail/nos2x/kpgefcfmnafjgpblomihpgmejjdanjjp)
+- [Chrome Extension](https://chrome.google.com/webstore/detail/nos2bch/kpgefcfmnafjgpblomihpgmejjdanjjp)
 
 ## Develop
 
 To run the plugin from this code:
 
 ```
-git clone https://github.com/fiatjaf/nos2x
-cd nos2x
+git clone https://github.com/fiatjaf/nos2bch
+cd nos2bch
 yarn
 ./build.js prod
 ```

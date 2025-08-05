@@ -1,20 +1,20 @@
 import browser from 'webextension-polyfill'
-import {createRoot} from 'react-dom/client'
-import {getPublicKey} from 'nostr-tools/pure'
+import { createRoot } from 'react-dom/client'
+import { getPublicKey } from 'nostr-tools/pure'
 import * as nip19 from 'nostr-tools/nip19'
-import React, {useState, useRef, useEffect} from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import QRCode from 'react-qr-code'
 
 function Popup() {
-  let [pubKey, setPubKey] = useState('')
+  const [pubKey, setPubKey] = useState('')
 
-  let keys = useRef([])
+  const keys = useRef([])
 
   useEffect(() => {
     browser.storage.local.get(['private_key', 'relays']).then(results => {
       if (results.private_key) {
-        let hexKey = getPublicKey(results.private_key)
-        let npubKey = nip19.npubEncode(hexKey)
+        const hexKey = getPublicKey(results.private_key)
+        const npubKey = nip19.npubEncode(hexKey)
 
         setPubKey(npubKey)
 
@@ -22,15 +22,15 @@ function Popup() {
         keys.current.push(hexKey)
 
         if (results.relays) {
-          let relaysList = []
-          for (let url in results.relays) {
+          const relaysList = []
+          for (const url in results.relays) {
             if (results.relays[url].write) {
               relaysList.push(url)
               if (relaysList.length >= 3) break
             }
           }
           if (relaysList.length) {
-            let nprofileKey = nip19.nprofileEncode({
+            const nprofileKey = nip19.nprofileEncode({
               pubkey: hexKey,
               relays: relaysList
             })
@@ -44,8 +44,8 @@ function Popup() {
   }, [])
 
   return (
-    <div style={{marginBottom: '5px'}}>
-      <h2>nos2x</h2>
+    <div style={{ marginBottom: '5px' }}>
+      <h2>nos2bch</h2>
       {pubKey === null ? (
         <div>
           <button onClick={openOptionsButton}>start here</button>
@@ -75,9 +75,9 @@ function Popup() {
           >
             <QRCode
               size={256}
-              style={{height: 'auto', maxWidth: '100%', width: '100%'}}
+              style={{ height: 'auto', maxWidth: '100%', width: '100%' }}
               value={pubKey.startsWith('n') ? pubKey.toUpperCase() : pubKey}
-              viewBox={`0 0 256 256`}
+              viewBox="0 0 256 256"
             />
           </div>
         </>
@@ -95,7 +95,7 @@ function Popup() {
 
   function toggleKeyType(e) {
     e.preventDefault()
-    let nextKeyType =
+    const nextKeyType =
       keys.current[(keys.current.indexOf(pubKey) + 1) % keys.current.length]
     setPubKey(nextKeyType)
   }

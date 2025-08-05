@@ -9,7 +9,7 @@ window.nostr = {
   },
 
   async signEvent(event) {
-    return this._call('signEvent', {event})
+    return this._call('signEvent', { event })
   },
 
   async getRelays() {
@@ -18,28 +18,28 @@ window.nostr = {
 
   nip04: {
     async encrypt(peer, plaintext) {
-      return window.nostr._call('nip04.encrypt', {peer, plaintext})
+      return window.nostr._call('nip04.encrypt', { peer, plaintext })
     },
 
     async decrypt(peer, ciphertext) {
-      return window.nostr._call('nip04.decrypt', {peer, ciphertext})
+      return window.nostr._call('nip04.decrypt', { peer, ciphertext })
     }
   },
 
   nip44: {
     async encrypt(peer, plaintext) {
-      return window.nostr._call('nip44.encrypt', {peer, plaintext})
+      return window.nostr._call('nip44.encrypt', { peer, plaintext })
     },
 
     async decrypt(peer, ciphertext) {
-      return window.nostr._call('nip44.decrypt', {peer, ciphertext})
+      return window.nostr._call('nip44.decrypt', { peer, ciphertext })
     }
   },
 
   _call(type, params) {
-    let id = Math.random().toString().slice(-4)
+    const id = Math.random().toString().slice(-4)
     console.log(
-      '%c[nos2x:%c' +
+      '%c[nos2bch:%c' +
         id +
         '%c]%c calling %c' +
         type +
@@ -54,11 +54,11 @@ window.nostr = {
       'font-weight:bold;color:#90b12d;font-family:monospace'
     )
     return new Promise((resolve, reject) => {
-      this._requests[id] = {resolve, reject}
+      this._requests[id] = { resolve, reject }
       window.postMessage(
         {
           id,
-          ext: 'nos2x',
+          ext: 'nos2bch',
           type,
           params
         },
@@ -73,13 +73,13 @@ window.addEventListener('message', message => {
     !message.data ||
     message.data.response === null ||
     message.data.response === undefined ||
-    message.data.ext !== 'nos2x' ||
+    message.data.ext !== 'nos2bch' ||
     !window.nostr._requests[message.data.id]
   )
     return
 
   if (message.data.response.error) {
-    let error = new Error('nos2x: ' + message.data.response.error.message)
+    const error = new Error('nos2bch: ' + message.data.response.error.message)
     error.stack = message.data.response.error.stack
     window.nostr._requests[message.data.id].reject(error)
   } else {
@@ -87,7 +87,7 @@ window.addEventListener('message', message => {
   }
 
   console.log(
-    '%c[nos2x:%c' +
+    '%c[nos2bch:%c' +
       message.data.id +
       '%c]%c result: %c' +
       JSON.stringify(
@@ -110,7 +110,7 @@ async function replaceNostrSchemeLink(e) {
   if (e.target.tagName !== 'A' || !e.target.href.startsWith('nostr:')) return
   if (replacing === false) return
 
-  let response = await window.nostr._call('replaceURL', {url: e.target.href})
+  const response = await window.nostr._call('replaceURL', { url: e.target.href })
   if (response === false) {
     replacing = false
     return
