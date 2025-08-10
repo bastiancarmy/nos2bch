@@ -7,8 +7,8 @@
     "start": "yarn build:dev"
   },
   "dependencies": {
-    "@bitauth/libauth": "^3.0.0",
-    "@noble/hashes": "^1.5.0",
+    "@bitauth/libauth": "^3.1.0",
+    "@noble/hashes": "^1.8.0",
     "@noble/secp256k1": "^2.1.0",
     "async-mutex": "^0.3.2",
     "canvas-confetti": "^1.9.3",
