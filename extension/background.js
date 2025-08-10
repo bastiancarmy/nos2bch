@@ -12,14 +12,16 @@ import {
   getPermissionStatus,
   updatePermission,
   showNotification,
-  getPosition
+  getPosition,
+  deriveBCHAddress,
+  getBCHBalance,
+  API_BASE
 } from './common'
 
 import * as secp from '@noble/secp256k1'
 import { hmac } from '@noble/hashes/hmac'
 import { sha256 } from '@noble/hashes/sha2'
-import { ripemd160 } from '@noble/hashes/legacy'
-import { encode } from 'cashaddrjs'
+import { ripemd160 } from '@noble/hashes/ripemd160'
 import {
   binToHex,
   cashAddressToLockingBytecode,
@@ -29,10 +31,8 @@ import {
   encodeTransactionInputSequenceNumbersForSigning,
   generateSigningSerializationBCH,
   hexToBin,
-  instantiateSha256
+  flattenBinArray
 } from '@bitauth/libauth'
-
-const API_BASE = 'https://api.fullstack.cash/v5/electrumx/'
 
 // Enable sync methods in secp
 secp.etc.hmacSha256Sync = (k, ...m) => hmac(sha256, k, secp.etc.concatBytes(...m))
@@ -68,17 +68,8 @@ browser.runtime.onInstalled.addListener((_, __, reason) => {
 })
 
 browser.runtime.onMessage.addListener(async (message, sender) => {
-  if (message.openSignUp) {
-    openSignUpWindow()
-    browser.windows.remove(sender.tab.windowId)
-  } else {
-    let {prompt} = message
-    if (prompt) {
-      handlePromptMessage(message, sender)
-    } else {
-      return handleContentScriptMessage(message)
-    }
-  }
+  // Internal message handler
+  return handleContentScriptMessage(message);
 })
 
 browser.runtime.onMessageExternal.addListener(
@@ -137,6 +128,11 @@ async function handleContentScriptMessage({type, params, host}) {
 
     return
   } else {
+    if (!host) {
+      // Internal message (e.g., from popup/options): trusted, no permission check needed.
+      return performOperation(type, params);
+    }
+
     // acquire mutex here before reading policies
     releasePromptMutex = await promptMutex.acquire()
 
@@ -146,7 +142,7 @@ async function handleContentScriptMessage({type, params, host}) {
     let allowed = await getPermissionStatus(
       host,
       type,
-      type === 'signEvent' ? params.event : undefined
+      params // Pass full params for tipBCH
     )
 
     if (allowed === true) {
@@ -243,6 +239,17 @@ async function performOperation(type, params) {
 
         return nip44.v2.decrypt(ciphertext, key)
       }
+      case 'getBCHAddress': {
+        return deriveBCHAddress(getPublicKey(sk))
+      }
+      case 'getBCHBalance': {
+        const address = deriveBCHAddress(getPublicKey(sk))
+        return getBCHBalance(address)
+      }
+      case 'tipBCH': {
+        const { recipientPubkey, amountSat } = params
+        return tipBCH(recipientPubkey, amountSat)
+      }
     }
   } catch (error) {
     return {error: {message: error.message, stack: error.stack}}
@@ -270,24 +277,7 @@ async function handlePromptMessage({host, type, accept, conditions}, sender) {
   }
 }
 
-async function openSignUpWindow() {
-  const {top, left} = await getPosition(width, height)
-
-  browser.windows.create({
-    url: `${browser.runtime.getURL('signup.html')}`,
-    type: 'popup',
-    width: width,
-    height: height,
-    top: top,
-    left: left
-  })
-}
-
 // --- BCH Helpers ---
-function _hash160 (x) {
-  return ripemd160(sha256(x))
-}
-
 function _encodeDer (r, s) {
   function encodeInt (val) {
     let bytes = []
@@ -315,90 +305,86 @@ function _buildP2PKHOutput (address) {
   return result.bytecode
 }
 
-async function sendTip (senderNpub, nsec, recipientNpub, amountSat) {
-  const { type, data: privBytes } = nip19.decode(nsec)
-  if (type !== 'nsec') {
-    return { success: false, error: 'Invalid nsec' }
+async function tipBCH (recipientPubkey, amountSat) {
+  const results = await browser.storage.local.get('private_key')
+  if (!results.private_key) {
+    throw new Error('No private key found')
   }
+  const sk = results.private_key
+  const pubHex = getPublicKey(sk)
+  const senderAddress = deriveBCHAddress(pubHex)
 
-  const compressedPub = secp.getPublicKey(privBytes, true)
-  const senderPkh = _hash160(compressedPub)
-  const senderAddress = encode('bitcoincash', 'P2PKH', senderPkh)
-
-  const recipientHex = nip19.decode(recipientNpub).data
-  const recipientXBytes = secp.utils.hexToBytes(recipientHex)
-  const recipientCompressedPub = new Uint8Array([0x02, ...recipientXBytes])
-  const recipientPkh = _hash160(recipientCompressedPub)
-  const recipientAddress = encode('bitcoincash', 'P2PKH', recipientPkh)
+  const recipientAddress = deriveBCHAddress(recipientPubkey)
 
   const utxoRes = await fetch(`${API_BASE}utxos/${senderAddress}`)
   if (!utxoRes.ok) {
-    return { success: false, error: 'Failed to fetch UTXOs' }
+    throw new Error('Failed to fetch UTXOs')
   }
   const utxoData = await utxoRes.json()
   if (!utxoData.success || !utxoData.utxos.length) {
-    return { success: false, error: 'No UTXOs found' }
+    throw new Error('No UTXOs found')
   }
+  const utxos = utxoData.utxos
 
-  const sha256Instance = await instantiateSha256()
-  const sha256Hash = sha256Instance.hash
+  const sha256Hash = sha256;
 
-  return new Promise((resolve) => {
-    sendTransaction(senderAddress, recipientAddress, amountSat, utxoData.utxos, sha256Hash, privBytes, (err, txId) => {
-      if (err) {
-        resolve({ success: false, error: err.message })
-      } else {
-        resolve({ success: true, txId })
-      }
-    })
-  })
+  return await sendTransaction(senderAddress, recipientAddress, amountSat, utxos, sha256Hash, hexToBytes(sk))
 }
 
-function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha256, privBytes, callback) {
-  const transaction = {
-    version: 2,
-    inputs: utxos.map(utxo => ({
-      outpointTransactionHash: hexToBin(utxo.txid),
-      outpointIndex: utxo.vout,
-      unlockingBytecode: new Uint8Array(),
-      sequenceNumber: 0xffffffff
-    })),
-    outputs: [{
-      valueSatoshis: BigInt(amountSat),
-      lockingBytecode: _buildP2PKHOutput(recipientAddress)
-    }],
-    locktime: 0
-  }
+async function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha256, privBytes) {
+  const inputs = utxos.map(utxo => ({
+    outpointTransactionHash: hexToBin(utxo.tx_hash).reverse(),
+    outpointIndex: utxo.tx_pos,
+    sequenceNumber: 0xffffffff,
+    unlockingBytecode: new Uint8Array()
+  }))
 
-  // Calculate fee and add change output
-  const inputCount = utxos.length
-  const estimatedSize = 10 + inputCount * 148 + 34 * 2 // Base + inputs + 2 outputs
-  const fee = BigInt(estimatedSize) // 1 sat/byte, adjust if needed
+  const outputs = [{
+    valueSatoshis: BigInt(amountSat),
+    lockingBytecode: _buildP2PKHOutput(recipientAddress)
+  }]
+
+  const inputCount = inputs.length
+  let estimatedSize = 10 + inputCount * 148 + 34 * 2
+  let fee = BigInt(estimatedSize)
   const totalInput = utxos.reduce((sum, utxo) => sum + BigInt(utxo.value), 0n)
-  const change = totalInput - BigInt(amountSat) - fee
+  let change = totalInput - BigInt(amountSat) - fee
   if (change < 0n) {
-    callback(new Error('Insufficient funds'))
-    return
+    throw new Error('Insufficient funds')
   }
-  if (change > 546n) { // Dust limit
-    transaction.outputs.push({
+  if (change >= 546n) {
+    outputs.push({
       valueSatoshis: change,
       lockingBytecode: _buildP2PKHOutput(senderAddress)
     })
+    estimatedSize += 34
+    fee = BigInt(estimatedSize)
+    change = totalInput - BigInt(amountSat) - fee
+    outputs[1].valueSatoshis = change
   }
 
-  transaction.inputs.forEach((input, i) => {
-    const coveredBytecode = hexToBin(utxos[i].scriptPubKey)
-    const transactionOutpointsHash = sha256(sha256(encodeTransactionOutpoints(transaction.inputs)))
-    const transactionSequenceNumbersHash = sha256(sha256(encodeTransactionInputSequenceNumbersForSigning(transaction.inputs)))
-    const transactionOutputsHash = sha256(sha256(encodeTransactionOutputs(transaction.outputs)))
+  const transaction = {
+    version: 2,
+    inputs,
+    outputs,
+    locktime: 0
+  }
+
+  const transactionOutpointsHash = sha256(sha256(encodeTransactionOutpoints(transaction.inputs)))
+  const transactionSequenceNumbersHash = sha256(sha256(encodeTransactionInputSequenceNumbersForSigning(transaction.inputs)))
+  const transactionOutputsHash = sha256(sha256(encodeTransactionOutputs(transaction.outputs)))
+
+  for (let i = 0; i < transaction.inputs.length; i++) {
+    const input = transaction.inputs[i]
+    const valueSatoshis = BigInt(utxos[i].value)
+    const coveredBytecode = _buildP2PKHOutput(senderAddress)
     const preimage = generateSigningSerializationBCH({
       forkId: BigInt(0),
       coveredBytecode,
       outpointTransactionHash: input.outpointTransactionHash,
       outpointIndex: input.outpointIndex,
       sequenceNumber: input.sequenceNumber,
-      valueSatoshis: BigInt(utxos[i].value),
+      valueSatoshis,
       version: transaction.version,
       transactionOutpointsHash,
       transactionSequenceNumbersHash,
@@ -407,28 +393,31 @@ function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha
       signingSerializationType: BigInt(0x41)
     })
     const message = sha256(sha256(preimage))
-    const sig = secp.sign(message, privBytes, { der: false })
+    const sig = secp.sign(message, privBytes, { der: false, lowS: true })
     const derSig = _encodeDer(sig.r, sig.s)
     const sigWithType = new Uint8Array([...derSig, 0x41])
     const pubkey = secp.getPublicKey(privBytes, true)
-    input.unlockingBytecode = new Uint8Array([sigWithType.length, ...sigWithType, pubkey.length, ...pubkey])
-  })
+    input.unlockingBytecode = flattenBinArray([
+      new Uint8Array([sigWithType.length]),
+      sigWithType,
+      new Uint8Array([pubkey.length]),
+      pubkey
+    ])
+  }
 
   const rawTx = binToHex(encodeTransaction(transaction))
 
-  fetch(`${API_BASE}broadcast`, {
+  const broadcastRes = await fetch(`${API_BASE}broadcast`, {
     method: 'POST',
     body: JSON.stringify({ rawtx: rawTx }),
     headers: { 'Content-Type': 'application/json' }
   })
-    .then(broadcastRes => {
-      if (!broadcastRes.ok) throw new Error(`Broadcast error: ${broadcastRes.statusText}`)
-      return broadcastRes.json()
-    })
-    .then(data => {
-      callback(null, data.txid)
-    })
-    .catch(e => {
-      callback(e)
-    })
+  if (!broadcastRes.ok) {
+    throw new Error(`Broadcast error: ${broadcastRes.statusText}`)
+  }
+  const data = await broadcastRes.json()
+  if (!data.success) {
+    throw new Error(data.error || 'Broadcast failed')
+  }
+  return data.txid
 }

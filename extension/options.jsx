@@ -1,5 +1,6 @@
+// extension/options.jsx
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
-import { getPublicKey } from 'nostr-tools'
+import { getPublicKey } from 'nostr-tools/pure'
 import * as nip19 from 'nostr-tools/nip19'
 import { decrypt, encrypt } from 'nostr-tools/nip49'
 import { generateSecretKey } from 'nostr-tools/pure'
@@ -7,7 +8,8 @@ import React, { useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import QRCode from 'react-qr-code'
 import browser from 'webextension-polyfill'
-import { removePermissions } from './common'
+import { removePermissions, deriveBCHAddress, getBCHBalance } from './common'
+import * as secp from '@noble/secp256k1'
 
 function Options() {
   const [unsavedChanges, setUnsavedChanges] = useState([])
@@ -23,6 +25,84 @@ function Options() {
   const [handleNostrLinks, setHandleNostrLinks] = useState(false)
   const [showProtocolHandlerHelp, setShowProtocolHandlerHelp] = useState(false)
   const [selectedItems, setSelectedItems] = useState([])
+  const [bchAddress, setBchAddress] = useState(null)
+  const [bchBalance, setBchBalance] = useState(null)
+  const [generated, setGenerated] = useState(false)
+  const [skHex, setSkHex] = useState(null)
+  const [error, setError] = useState(null)
+
+  // Load key and derive BCH on mount
+  useEffect(() => {
+    browser.storage.local.get('private_key').then(results => {
+      if (!results.private_key) {
+        setError('No private key found. Import or generate one.');
+        return;
+      }
+      try {
+       // Validate private key before derivation (from noble/secp256k1)
+       if (!secp.utils.isValidPrivateKey(hexToBytes(results.private_key))) {
+         throw new Error('Invalid private key: not on secp256k1 curve');
+       }
+        const pubHex = getPublicKey(results.private_key);
+        const address = deriveBCHAddress(pubHex);
+        setBchAddress(address);
+        getBCHBalance(address)
+          .then(balance => setBchBalance(balance))
+          .catch(err => {
+            console.error('Balance fetch failed:', err);
+            setError('Failed to load BCH balance: ' + err.message);
+          });
+      } catch (err) {
+        console.error('Key load error:', err);
+        setError('Invalid private key: ' + err.message);
+      }
+    });
+  }, []);
+
+  const handleImport = async () => {
+    try {
+      let { type, data } = nip19.decode(privKeyInput)
+      if (type !== 'nsec') throw new Error('Invalid nsec')
+      const skHexLocal = bytesToHex(data)
+      getPublicKey(skHexLocal) // Validate
+      await browser.storage.local.set({ private_key: skHexLocal })
+      const pubHex = getPublicKey(skHexLocal)
+      setBchAddress(deriveBCHAddress(pubHex))
+      getBCHBalance(deriveBCHAddress(pubHex)).then(setBchBalance).catch(err => console.error('Balance error:', err))
+      setPrivKeyInput(nip19.nsecEncode(data))
+      setPrivKey(nip19.nsecEncode(data))
+      window.close() // Or refresh
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const handleGenerate = () => {
+    try {
+      const skBytes = generateSecretKey()
+      const skHexLocal = bytesToHex(skBytes)
+      getPublicKey(skHexLocal) // Validate
+      setSkHex(skHexLocal)
+      setGenerated(true)
+      setError(null)
+      setBchAddress(deriveBCHAddress(getPublicKey(skHexLocal)))
+    } catch (err) {
+      setError(err.message)
+    }
+  }
+
+  const handleSave = async () => {
+    try {
+      await browser.storage.local.set({ private_key: skHex })
+      getBCHBalance(bchAddress).then(setBchBalance).catch(err => console.error('Balance error:', err))
+      setPrivKeyInput(nip19.nsecEncode(hexToBytes(skHex)))
+      setPrivKey(nip19.nsecEncode(hexToBytes(skHex)))
+      hidePrivateKey(true)
+      window.close()
+    } catch (err) {
+      setError(err.message)
+    }
+  }
 
   const showMessage = msg => {
     setMessages(oldMessages => [...oldMessages, msg])
@@ -55,10 +135,17 @@ function Options() {
           setNotifications(true)
         }
       })
+      .catch(err => {
+        console.error('Error loading settings:', err)
+        setError('Failed to load settings: ' + err.message)
+      })
   }, [])
 
   useEffect(() => {
-    loadPermissions()
+    loadPermissions().catch(err => {
+      console.error('Error loading permissions:', err)
+      setError('Failed to load permissions: ' + err.message)
+    })
   }, [])
 
   async function loadPermissions() {
@@ -138,6 +225,7 @@ function Options() {
               !isKeyValid() && (
                 <div style={{ color: 'red' }}>private key is invalid!</div>
               )}
+            {error && <div style={{ color: 'red' }}>{error}</div>}
             {!hidingPrivateKey &&
               privKeyInput !== '' &&
               (privKeyInput.startsWith('ncryptsec1') || isKeyValid()) && (
@@ -157,6 +245,14 @@ function Options() {
                   />
                 </div>
               )}
+            {bchAddress && (
+              <div>
+                <h4>BCH Address (from npub):</h4>
+                <pre>{bchAddress}</pre>
+                <h4>BCH Balance:</h4>
+                <pre>{bchBalance ? `${bchBalance} sat` : 'Loading...'}</pre>
+              </div>
+            )}
           </div>
         </div>
         {askPassword && (
@@ -180,29 +276,22 @@ function Options() {
                   onChange={ev => setPassword(ev.target.value)}
                   style={{ width: '150px' }}
                 />
-                {askPassword === 'decrypt/save'
-? (
-  <button
-    onClick={decryptPrivateKeyAndSave}
-    disabled={!password}
-  >
-    decrypt key
-  </button>
-                )
-: askPassword === 'encrypt/display'
-? (
-  <button
-    onClick={ev => {
-                      console.log('gah')
-                      encryptPrivateKeyAndDisplay(ev)
-                    }}
-    disabled={!password}
-  >
-    encrypt and show key
-  </button>
-                )
-: (
-                  'jaksbdkjsad'
+                {askPassword === 'decrypt/save' ? (
+                  <button
+                    onClick={decryptPrivateKeyAndSave}
+                    disabled={!password}
+                  >
+                    decrypt key
+                  </button>
+                ) : askPassword === 'encrypt/display' ? (
+                  <button
+                    onClick={encryptPrivateKeyAndDisplay}
+                    disabled={!password}
+                  >
+                    encrypt and show key
+                  </button>
+                ) : (
+                  'Invalid password mode'
                 )}
               </form>
             </div>
@@ -333,6 +422,8 @@ function Options() {
                       <td>
                         {conditions.kinds
                           ? `kinds: ${Object.keys(conditions.kinds).join(', ')}`
+                          : conditions.maxAmountSat
+                          ? `max amount: ${conditions.maxAmountSat} sat`
                           : 'always'}
                       </td>
                       <td>
@@ -357,16 +448,14 @@ function Options() {
                 )}
               </tbody>
             </table>
-            {selectedItems.length > 0
-? (
-  <button
-    style={{ marginLeft: '0.5rem' }}
-    onClick={handleMultiRevoke}
-  >
-    revoke
-  </button>
-            )
-: null}
+            {selectedItems.length > 0 ? (
+              <button
+                style={{ marginLeft: '0.5rem' }}
+                onClick={handleMultiRevoke}
+              >
+                revoke
+              </button>
+            ) : null}
           </div>
         )}
         {!policies.length && (
@@ -414,8 +503,17 @@ function Options() {
   }
 
   async function generate() {
-    setPrivKeyInput(nip19.nsecEncode(generateSecretKey()))
-    addUnsavedChanges('private_key')
+    const skBytes = generateSecretKey();
+    const nsec = nip19.nsecEncode(skBytes);
+    setPrivKeyInput(nsec);
+    addUnsavedChanges('private_key');
+
+    // NEW: Test derivation on generate
+    const pubkeyHex = getPublicKey(skBytes);  // 64-char hex (32 bytes x-only)
+    const address = deriveBCHAddress(pubkeyHex);
+    setBchAddress(address);
+    console.log('Derived BCH Address:', address);  // For debugging
+    // END NEW
   }
 
   function encryptPrivateKeyAndDisplay(ev) {
@@ -472,10 +570,29 @@ function Options() {
   function isKeyValid() {
     if (privKeyInput === '') return true
     try {
-      if (nip19.decode(privKeyInput).type === 'nsec') return true
+      const { type, data } = nip19.decode(privKeyInput)
+      if (type === 'nsec') {
+        getPublicKey(bytesToHex(data)) // Validates key is usable on curve
+        return true
+      }
     } catch (_) {}
     return false
   }
+
+  useEffect(() => {
+    if (privKeyInput && isKeyValid() && !bchAddress) {
+      try {
+        const { data } = nip19.decode(privKeyInput)
+        const skHexLocal = bytesToHex(data)
+        const pubHex = getPublicKey(skHexLocal)
+        const address = deriveBCHAddress(pubHex)
+        setBchAddress(address)
+        getBCHBalance(address).then(setBchBalance).catch(err => console.error('Balance error:', err))
+      } catch (err) {
+        setError('Invalid key or derivation error: ' + err.message)
+      }
+    }
+  }, [privKeyInput, bchAddress])
 
   async function handleSelect(index) {
     if (selectedItems.includes(index)) {

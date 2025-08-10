@@ -1,3 +1,4 @@
+// extension/popup.jsx
 import browser from 'webextension-polyfill'
 import { createRoot } from 'react-dom/client'
 import { getPublicKey } from 'nostr-tools/pure'
@@ -6,7 +7,9 @@ import React, { useState, useRef, useEffect } from 'react'
 import QRCode from 'react-qr-code'
 
 function Popup() {
-  const [pubKey, setPubKey] = useState('')
+  let [pubKey, setPubKey] = useState('')
+  const [recipientNpub, setRecipientNpub] = useState('')
+  const [amountSat, setAmountSat] = useState(0)
 
   const keys = useRef([])
 
@@ -80,6 +83,12 @@ function Popup() {
               viewBox="0 0 256 256"
             />
           </div>
+          <div>
+            <h3>Tip BCH</h3>
+            <input placeholder="Recipient npub" value={recipientNpub} onChange={e => setRecipientNpub(e.target.value)} />
+            <input type="number" placeholder="Amount (sat)" value={amountSat} onChange={e => setAmountSat(e.target.value)} />
+            <button onClick={handleTip}>Send Tip</button>
+          </div>
         </>
       )}
     </div>
@@ -98,6 +107,18 @@ function Popup() {
     const nextKeyType =
       keys.current[(keys.current.indexOf(pubKey) + 1) % keys.current.length]
     setPubKey(nextKeyType)
+  }
+
+  async function handleTip() {
+    try {
+      const { type, data } = nip19.decode(recipientNpub)
+      if (type !== 'npub') throw new Error('Invalid npub')
+      const response = await browser.runtime.sendMessage({ type: 'tipBCH', params: { recipientPubkey: data, amountSat } })
+      if (response.error) throw new Error(response.error.message)
+      alert(`Tip sent! TxID: ${response}`)
+    } catch (err) {
+      alert(`Error: ${err.message}`)
+    }
   }
 }
 

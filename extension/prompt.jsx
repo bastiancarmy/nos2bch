@@ -1,15 +1,15 @@
+// extension/prompt.jsx (updated for tipBCH permissions)
 import browser from 'webextension-polyfill'
-import { createRoot } from 'react-dom/client'
+import {createRoot} from 'react-dom/client'
 import React from 'react'
-
-import { PERMISSION_NAMES } from './common'
+import {PERMISSION_NAMES} from './common'
 
 function Prompt() {
-  const qs = new URLSearchParams(location.search)
-  const id = qs.get('id')
-  const host = qs.get('host')
-  const type = qs.get('type')
-  const result = qs.get('result')
+  let qs = new URLSearchParams(location.search)
+  let id = qs.get('id')
+  let host = qs.get('host')
+  let type = qs.get('type')
+  let result = qs.get('result')
   let params, event
   try {
     params = JSON.parse(qs.get('params'))
@@ -21,15 +21,15 @@ function Prompt() {
 
   return (
     <>
-      <b style={{ display: 'block', textAlign: 'center', fontSize: '200%' }}>
+      <b style={{display: 'block', textAlign: 'center', fontSize: '200%'}}>
         {host}
       </b>{' '}
-      <p style={{ margin: 0 }}>
+      <p style={{margin: 0}}>
         is requesting your permission to <b>{PERMISSION_NAMES[type]}:</b>
       </p>
       {params && (
-        <div style={{ width: '100%', maxHeight: '200px', overflowY: 'scroll' }}>
-          <p style={{ margin: 0 }}>now acting on</p>
+        <div style={{width: '100%', maxHeight: '200px', overflowY: 'scroll'}}>
+          <p style={{margin: 0}}>now acting on</p>
           <pre
             style={{
               width: '100%',
@@ -42,8 +42,8 @@ function Prompt() {
         </div>
       )}
       {result && (
-        <div style={{ width: '100%', maxHeight: '180px', overflowY: 'scroll' }}>
-          <p style={{ margin: 0 }}>result:</p>
+        <div style={{width: '100%', maxHeight: '180px', overflowY: 'scroll'}}>
+          <p style={{margin: 0}}>result:</p>
           <pre
             style={{
               width: '100%',
@@ -56,72 +56,114 @@ function Prompt() {
         </div>
       )}
       <div>
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-around',
-            gap: '0.5rem'
-          }}
-        >
-          {event?.kind === undefined && (
-            <button
-              style={{ marginTop: '5px' }}
-              onClick={authorizeHandler(
-                true,
-                {} // store this and answer true forever
-              )}
+        {type === 'tipBCH' ? (
+          <>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-around',
+                gap: '0.5rem'
+              }}
             >
-              authorize forever
-            </button>
-          )}
-          {event?.kind !== undefined && (
-            <button
-              style={{ marginTop: '5px' }}
-              onClick={authorizeHandler(
-                true,
-                { kinds: { [event.kind]: true } } // store and always answer true for all events that match this condition
-              )}
+              <button
+                style={{marginTop: '5px'}}
+                onClick={authorizeHandler(true, {maxAmountSat: 50000000})}
+              >
+                authorize tips up to 0.5 BCH forever
+              </button>
+              <button style={{marginTop: '5px'}} onClick={authorizeHandler(true)}>
+                authorize just this
+              </button>
+            </div>
+            <div
+              style={{
+                marginTop: '0.5rem',
+                display: 'flex',
+                justifyContent: 'space-around',
+                gap: '0.5rem'
+              }}
             >
-              authorize kind {event.kind} forever
-            </button>
-          )}
-          <button style={{ marginTop: '5px' }} onClick={authorizeHandler(true)}>
-            authorize just this
-          </button>
-        </div>
-        <div
-          style={{
-            marginTop: '0.5rem',
-            display: 'flex',
-            justifyContent: 'space-around',
-            gap: '0.5rem'
-          }}
-        >
-          {event?.kind !== undefined ? (
-            <button
-              style={{ marginTop: '5px' }}
-              onClick={authorizeHandler(
-                false,
-                { kinds: { [event.kind]: true } } // idem
-              )}
+              <button
+                style={{marginTop: '5px'}}
+                onClick={authorizeHandler(false, {maxAmountSat: 50000000})}
+              >
+                reject tips up to 0.5 BCH forever
+              </button>
+              <button style={{marginTop: '5px'}} onClick={authorizeHandler(false)}>
+                reject
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-around',
+                gap: '0.5rem'
+              }}
             >
-              reject kind {event.kind} forever
-            </button>
-          ) : (
-            <button
-              style={{ marginTop: '5px' }}
-              onClick={authorizeHandler(
-                false,
-                {} // idem
+              {event?.kind === undefined && (
+                <button
+                  style={{marginTop: '5px'}}
+                  onClick={authorizeHandler(
+                    true,
+                    {} // store this and answer true forever
+                  )}
+                >
+                  authorize forever
+                </button>
               )}
+              {event?.kind !== undefined && (
+                <button
+                  style={{marginTop: '5px'}}
+                  onClick={authorizeHandler(
+                    true,
+                    {kinds: {[event.kind]: true}} // store and always answer true for all events that match this condition
+                  )}
+                >
+                  authorize kind {event.kind} forever
+                </button>
+              )}
+              <button style={{marginTop: '5px'}} onClick={authorizeHandler(true)}>
+                authorize just this
+              </button>
+            </div>
+            <div
+              style={{
+                marginTop: '0.5rem',
+                display: 'flex',
+                justifyContent: 'space-around',
+                gap: '0.5rem'
+              }}
             >
-              reject forever
-            </button>
-          )}
-          <button style={{ marginTop: '5px' }} onClick={authorizeHandler(false)}>
-            reject
-          </button>
-        </div>
+              {event?.kind !== undefined ? (
+                <button
+                  style={{marginTop: '5px'}}
+                  onClick={authorizeHandler(
+                    false,
+                    {kinds: {[event.kind]: true}} // idem
+                  )}
+                >
+                  reject kind {event.kind} forever
+                </button>
+              ) : (
+                <button
+                  style={{marginTop: '5px'}}
+                  onClick={authorizeHandler(
+                    false,
+                    {} // idem
+                  )}
+                >
+                  reject forever
+                </button>
+              )}
+              <button style={{marginTop: '5px'}} onClick={authorizeHandler(false)}>
+                reject
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </>
   )

@@ -1,4 +1,11 @@
+// extension/common.js
 import browser from 'webextension-polyfill'
+import { hexToBytes } from '@noble/hashes/utils'
+import { sha256 } from '@noble/hashes/sha256'
+import { ripemd160 } from '@noble/hashes/ripemd160'
+import { encode } from 'cashaddrjs'
+
+export const API_BASE = 'https://api.fullstack.cash/v5/electrumx/'
 
 export const NO_PERMISSIONS_REQUIRED = {
   replaceURL: true
@@ -10,38 +17,36 @@ export const PERMISSION_NAMES = Object.fromEntries([
   ['nip04.encrypt', 'encrypt messages to peers'],
   ['nip04.decrypt', 'decrypt messages from peers'],
   ['nip44.encrypt', 'encrypt messages to peers'],
-  ['nip44.decrypt', 'decrypt messages from peers']
+  ['nip44.decrypt', 'decrypt messages from peers'],
+  ['getBCHAddress', 'get your BCH address'],
+  ['getBCHBalance', 'get your BCH balance'],
+  ['tipBCH', 'tip BCH using your key']
 ])
 
-function matchConditions(conditions, event) {
-  if (conditions?.kinds) {
-    if (event.kind in conditions.kinds) return true
-    else return false
+function matchConditions(conditions, type, params) {
+  if (type === 'signEvent') {
+    if (conditions?.kinds) {
+      if (params.kind in conditions.kinds) return true
+      else return false
+    }
+  } else if (type === 'tipBCH') {
+    if (conditions?.maxAmountSat) {
+      return params.amountSat <= conditions.maxAmountSat
+    }
   }
-
   return true
 }
 
-export async function getPermissionStatus(host, type, event) {
+export async function getPermissionStatus(host, type, params) {
   const { policies } = await browser.storage.local.get('policies')
 
-  const answers = [true, false]
+  const answers = ['true', 'false']
   for (let i = 0; i < answers.length; i++) {
     const accept = answers[i]
     const { conditions } = policies?.[host]?.[accept]?.[type] || {}
 
-    if (conditions) {
-      if (type === 'signEvent') {
-        if (matchConditions(conditions, event)) {
-          return accept // may be true or false
-        } else {
-          // if this doesn't match we just continue so it will either match for the opposite answer (reject)
-          // or it will end up returning undefined at the end
-          continue
-        }
-      } else {
-        return accept // may be true or false
-      }
+    if (matchConditions(conditions, type, params)) {
+      return accept === 'true'
     }
   }
 
@@ -62,6 +67,9 @@ export async function updatePermission(host, type, accept, conditions) {
         Object.keys(existingConditions.kinds).forEach(kind => {
           conditions.kinds[kind] = true
         })
+      } else if (existingConditions.maxAmountSat && conditions.maxAmountSat) {
+        // For tipBCH, perhaps take min maxAmount
+        conditions.maxAmountSat = Math.min(conditions.maxAmountSat, existingConditions.maxAmountSat)
       }
     }
   }
@@ -144,4 +152,29 @@ export async function getPosition(width, height) {
     top,
     left
   }
+}
+
+function _hash160(input) {
+  return ripemd160(sha256(input))
+}
+
+export function deriveBCHAddress(pubkeyHex) {
+  const xBytes = hexToBytes(pubkeyHex)
+  const compressed = new Uint8Array(33)
+  compressed[0] = 0x02
+  compressed.set(xBytes, 1)
+  const hash = _hash160(compressed)
+  return encode('bitcoincash', 'P2PKH', hash)
+}
+
+export async function getBCHBalance(address) {
+  const res = await fetch(`${API_BASE}balance/${address}`)
+  if (!res.ok) {
+    throw new Error('Failed to fetch balance')
+  }
+  const data = await res.json()
+  if (!data.success) {
+    throw new Error('Balance fetch unsuccessful')
+  }
+  return data.balance.confirmed + data.balance.unconfirmed
 }
