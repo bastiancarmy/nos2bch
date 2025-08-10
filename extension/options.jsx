@@ -1,33 +1,35 @@
-import { bytesToHex, hexToBytes } from '@noble/hashes/utils'
-import { getPublicKey } from 'nostr-tools'
+// extension/options.jsx
+import {bytesToHex, hexToBytes} from '@noble/hashes/utils'
+import {getPublicKey} from 'nostr-tools'
 import * as nip19 from 'nostr-tools/nip19'
-import { decrypt, encrypt } from 'nostr-tools/nip49'
-import { generateSecretKey } from 'nostr-tools/pure'
-import React, { useEffect, useState } from 'react'
-import { createRoot } from 'react-dom/client'
+import {decrypt, encrypt} from 'nostr-tools/nip49'
+import {generateSecretKey} from 'nostr-tools/pure'
+import React, {useEffect, useState} from 'react'
+import {createRoot} from 'react-dom/client'
 import QRCode from 'react-qr-code'
 import browser from 'webextension-polyfill'
-import { removePermissions } from './common'
+import {removePermissions, deriveBCHAddress, getBCHBalance} from './common'
 
 function Options() {
-  const [unsavedChanges, setUnsavedChanges] = useState([])
-  const [privKey, setPrivKey] = useState(null)
-  const [privKeyInput, setPrivKeyInput] = useState('')
-  const [askPassword, setAskPassword] = useState(null)
-  const [password, setPassword] = useState('')
-  const [policies, setPermissions] = useState([])
-  const [protocolHandler, setProtocolHandler] = useState('https://njump.me/{raw}')
-  const [hidingPrivateKey, hidePrivateKey] = useState(true)
-  const [showNotifications, setNotifications] = useState(false)
-  const [messages, setMessages] = useState([])
-  const [handleNostrLinks, setHandleNostrLinks] = useState(false)
-  const [showProtocolHandlerHelp, setShowProtocolHandlerHelp] = useState(false)
-  const [selectedItems, setSelectedItems] = useState([])
+  let [unsavedChanges, setUnsavedChanges] = useState([])
+  let [privKey, setPrivKey] = useState(null)
+  let [privKeyInput, setPrivKeyInput] = useState('')
+  let [askPassword, setAskPassword] = useState(null)
+  let [password, setPassword] = useState('')
+  let [policies, setPermissions] = useState([])
+  let [protocolHandler, setProtocolHandler] = useState('https://njump.me/{raw}')
+  let [hidingPrivateKey, hidePrivateKey] = useState(true)
+  let [showNotifications, setNotifications] = useState(false)
+  let [messages, setMessages] = useState([])
+  let [handleNostrLinks, setHandleNostrLinks] = useState(false)
+  let [showProtocolHandlerHelp, setShowProtocolHandlerHelp] = useState(false)
+  let [selectedItems, setSelectedItems] = useState([])
+  let [bchAddress, setBchAddress] = useState(null)
+  let [bchBalance, setBchBalance] = useState(null)
 
   const showMessage = msg => {
     setMessages(oldMessages => [...oldMessages, msg])
   }
-
   useEffect(() => {
     if (messages.length === 0) {
       return
@@ -35,16 +37,19 @@ function Options() {
     const timeout = setTimeout(() => setMessages([]), 3000)
     return () => clearTimeout(timeout)
   }, [messages, setMessages])
-
   useEffect(() => {
     browser.storage.local
       .get(['private_key', 'protocol_handler', 'notifications'])
       .then(results => {
         if (results.private_key) {
-          const prvKey = results.private_key
-          const nsec = nip19.nsecEncode(hexToBytes(prvKey))
+          let prvKey = results.private_key
+          let nsec = nip19.nsecEncode(hexToBytes(prvKey))
           setPrivKeyInput(nsec)
           setPrivKey(nsec)
+          let pubHex = getPublicKey(prvKey)
+          let address = deriveBCHAddress(pubHex)
+          setBchAddress(address)
+          getBCHBalance(address).then(balance => setBchBalance(balance)).catch(err => setBchBalance('Error: ' + err.message))
         }
         if (results.protocol_handler) {
           setProtocolHandler(results.protocol_handler)
@@ -56,18 +61,15 @@ function Options() {
         }
       })
   }, [])
-
   useEffect(() => {
     loadPermissions()
   }, [])
-
   async function loadPermissions() {
-    const { policies = {} } = await browser.storage.local.get('policies')
-    const list = []
-
+    let {policies = {}} = await browser.storage.local.get('policies')
+    let list = []
     Object.entries(policies).forEach(([host, accepts]) => {
       Object.entries(accepts).forEach(([accept, types]) => {
-        Object.entries(types).forEach(([type, { conditions, created_at }]) => {
+        Object.entries(types).forEach(([type, {conditions, created_at}]) => {
           list.push({
             host,
             type,
@@ -78,15 +80,13 @@ function Options() {
         })
       })
     })
-
     setPermissions(list)
   }
-
   return (
     <>
-      <h1 style={{ fontSize: '25px', marginBlockEnd: '0px' }}>nos2bch</h1>
-      <p style={{ marginBlockStart: '0px' }}>nostr signer extension</p>
-      <h2 style={{ marginBlockStart: '20px', marginBlockEnd: '5px' }}>options</h2>
+      <h1 style={{fontSize: '25px', marginBlockEnd: '0px'}}>nos2x</h1>
+      <p style={{marginBlockStart: '0px'}}>nostr signer extension</p>
+      <h2 style={{marginBlockStart: '20px', marginBlockEnd: '5px'}}>options</h2>
       <div
         style={{
           marginBottom: '10px',
@@ -106,10 +106,10 @@ function Options() {
               gap: '10px'
             }}
           >
-            <div style={{ display: 'flex', gap: '10px' }}>
+            <div style={{display: 'flex', gap: '10px'}}>
               <input
                 type={hidingPrivateKey ? 'password' : 'text'}
-                style={{ width: '600px' }}
+                style={{width: '600px'}}
                 value={privKeyInput}
                 onChange={handleKeyChange}
               />
@@ -128,7 +128,6 @@ function Options() {
                   </button>
                 </>
               )}
-
               {privKeyInput && !hidingPrivateKey && (
                 <button onClick={hideAndResetKeyInput}>hide key</button>
               )}
@@ -136,7 +135,7 @@ function Options() {
             {privKeyInput &&
               !privKeyInput.startsWith('ncryptsec1') &&
               !isKeyValid() && (
-                <div style={{ color: 'red' }}>private key is invalid!</div>
+                <div style={{color: 'red'}}>private key is invalid!</div>
               )}
             {!hidingPrivateKey &&
               privKeyInput !== '' &&
@@ -151,12 +150,18 @@ function Options() {
                 >
                   <QRCode
                     size={256}
-                    style={{ height: 'auto', maxWidth: '100%', width: '100%' }}
+                    style={{height: 'auto', maxWidth: '100%', width: '100%'}}
                     value={privKeyInput.toUpperCase()}
-                    viewBox="0 0 256 256"
+                    viewBox={`0 0 256 256`}
                   />
                 </div>
               )}
+            {bchAddress && (
+              <div>
+                <div>BCH Address (from npub): {bchAddress}</div>
+                <div>BCH Balance: {bchBalance !== null ? bchBalance + ' sat' : 'Loading...'}</div>
+              </div>
+            )}
           </div>
         </div>
         {askPassword && (
@@ -171,37 +176,33 @@ function Options() {
               }}
             >
               <form
-                style={{ display: 'flex', flexDirection: 'row', gap: '10px' }}
+                style={{display: 'flex', flexDirection: 'row', gap: '10px'}}
               >
                 <input
                   autoFocus
                   type="password"
                   value={password}
                   onChange={ev => setPassword(ev.target.value)}
-                  style={{ width: '150px' }}
+                  style={{width: '150px'}}
                 />
-                {askPassword === 'decrypt/save'
-? (
-  <button
-    onClick={decryptPrivateKeyAndSave}
-    disabled={!password}
-  >
-    decrypt key
-  </button>
-                )
-: askPassword === 'encrypt/display'
-? (
-  <button
-    onClick={ev => {
+                {askPassword === 'decrypt/save' ? (
+                  <button
+                    onClick={decryptPrivateKeyAndSave}
+                    disabled={!password}
+                  >
+                    decrypt key
+                  </button>
+                ) : askPassword === 'encrypt/display' ? (
+                  <button
+                    onClick={ev => {
                       console.log('gah')
                       encryptPrivateKeyAndDisplay(ev)
                     }}
-    disabled={!password}
-  >
-    encrypt and show key
-  </button>
-                )
-: (
+                    disabled={!password}
+                  >
+                    encrypt and show key
+                  </button>
+                ) : (
                   'jaksbdkjsad'
                 )}
               </form>
@@ -218,21 +219,21 @@ function Options() {
               gap: '10px'
             }}
           >
-            <div style={{ display: 'flex', gap: '10px' }}>
+            <div style={{display: 'flex', gap: '10px'}}>
               <button
                 onClick={() => {
-                  const { data } = nip19.decode(privKey)
-                  const pub = getPublicKey(data)
-                  const npub = nip19.npubEncode(pub)
+                  let {data} = nip19.decode(privKey)
+                  let pub = getPublicKey(data)
+                  let npub = nip19.npubEncode(pub)
                   window.open('https://nosta.me/' + npub)
                 }}
-                style={{ cursor: 'pointer' }}
+                style={{cursor: 'pointer'}}
               >
                 browse your profile
               </button>
               <button
                 onClick={() => window.open('https://nosta.me/login/options')}
-                style={{ cursor: 'pointer' }}
+                style={{cursor: 'pointer'}}
               >
                 edit your profile
               </button>
@@ -240,10 +241,10 @@ function Options() {
           </div>
         </div>
         <div>
-          <label style={{ display: 'flex', alignItems: 'center' }}>
+          <label style={{display: 'flex', alignItems: 'center'}}>
             <div>
               handle{' '}
-              <span style={{ padding: '2px', background: 'silver' }}>nostr:</span>{' '}
+              <span style={{padding: '2px', background: 'silver'}}>nostr:</span>{' '}
               links:
             </div>
             <input
@@ -252,15 +253,15 @@ function Options() {
               onChange={changeHandleNostrLinks}
             />
           </label>
-          <div style={{ marginLeft: '10px' }}>
+          <div style={{marginLeft: '10px'}}>
             {handleNostrLinks && (
               <div>
-                <div style={{ display: 'flex' }}>
+                <div style={{display: 'flex'}}>
                   <input
                     placeholder="url template"
                     value={protocolHandler}
                     onChange={handleChangeProtocolHandler}
-                    style={{ width: '680px', maxWidth: '90%' }}
+                    style={{width: '680px', maxWidth: '90%'}}
                   />
                   {!showProtocolHandlerHelp && (
                     <button onClick={changeShowProtocolHandlerHelp}>?</button>
@@ -276,7 +277,6 @@ function Options() {
     {relay1} = second relay in a nprofile or nevent
     {relay2} = third relay in a nprofile or nevent
     {hrp} = human-readable prefix of the nip19 string
-
     examples:
       - https://njump.me/{raw}
       - https://snort.social/{raw}
@@ -287,7 +287,7 @@ function Options() {
             )}
           </div>
         </div>
-        <label style={{ display: 'flex', alignItems: 'center' }}>
+        <label style={{display: 'flex', alignItems: 'center'}}>
           show notifications when permissions are used:
           <input
             type="checkbox"
@@ -298,11 +298,11 @@ function Options() {
         <button
           disabled={!unsavedChanges.length}
           onClick={saveChanges}
-          style={{ padding: '5px 20px' }}
+          style={{padding: '5px 20px'}}
         >
           save
         </button>
-        <div style={{ fontSize: '120%' }}>
+        <div style={{fontSize: '120%'}}>
           {messages.map((message, i) => (
             <div key={i}>{message}</div>
           ))}
@@ -311,7 +311,7 @@ function Options() {
       <div>
         <h2>permissions</h2>
         {!!policies.length && (
-          <div style={{ display: 'flex' }}>
+          <div style={{display: 'flex'}}>
             <table>
               <thead>
                 <tr>
@@ -325,7 +325,7 @@ function Options() {
               </thead>
               <tbody>
                 {policies.map(
-                  ({ host, type, accept, conditions, created_at }, index) => (
+                  ({host, type, accept, conditions, created_at}, index) => (
                     <tr key={host + type + accept + JSON.stringify(conditions)}>
                       <td>{host}</td>
                       <td>{type}</td>
@@ -357,38 +357,33 @@ function Options() {
                 )}
               </tbody>
             </table>
-            {selectedItems.length > 0
-? (
-  <button
-    style={{ marginLeft: '0.5rem' }}
-    onClick={handleMultiRevoke}
-  >
-    revoke
-  </button>
-            )
-: null}
+            {selectedItems.length > 0 ? (
+              <button
+                style={{marginLeft: '0.5rem'}}
+                onClick={handleMultiRevoke}
+              >
+                revoke
+              </button>
+            ) : null}
           </div>
         )}
         {!policies.length && (
-          <div style={{ marginTop: '5px' }}>
+          <div style={{marginTop: '5px'}}>
             no permissions have been granted yet
           </div>
         )}
       </div>
     </>
   )
-
   async function hideAndResetKeyInput() {
     setPrivKeyInput(privKey)
     hidePrivateKey(true)
   }
-
   async function handleKeyChange(e) {
     let key = e.target.value.toLowerCase().trim()
     setPrivKeyInput(key)
-
     try {
-      const bytes = hexToBytes(key)
+      let bytes = hexToBytes(key)
       if (bytes.length === 32) {
         key = nip19.nsecEncode(bytes)
         setPrivKeyInput(key)
@@ -396,34 +391,33 @@ function Options() {
     } catch (err) {
       /***/
     }
-
     if (key.startsWith('ncryptsec1')) {
       // we won't save an encrypted key, will wait for the password
       setAskPassword('decrypt/save')
       return
     }
-
     try {
       // we will only save a key that is a valid nsec
       if (nip19.decode(key).type === 'nsec') {
         addUnsavedChanges('private_key')
+        setBchAddress(deriveBCHAddress(getPublicKey(bytesToHex(nip19.decode(key).data))))
       }
     } catch (err) {
       /***/
     }
   }
-
   async function generate() {
-    setPrivKeyInput(nip19.nsecEncode(generateSecretKey()))
+    let skBytes = generateSecretKey()
+    let nsec = nip19.nsecEncode(skBytes)
+    setPrivKeyInput(nsec)
     addUnsavedChanges('private_key')
+    setBchAddress(deriveBCHAddress(getPublicKey(skBytes)))
   }
-
   function encryptPrivateKeyAndDisplay(ev) {
     ev.preventDefault()
-
     try {
-      const { data } = nip19.decode(privKeyInput)
-      const encrypted = encrypt(data, password, 16, 0x00)
+      let {data} = nip19.decode(privKeyInput)
+      let encrypted = encrypt(data, password, 16, 0x00)
       setPrivKeyInput(encrypted)
       hidePrivateKey(false)
       setAskPassword(null)
@@ -431,25 +425,22 @@ function Options() {
       showMessage(e.message)
     }
   }
-
   function decryptPrivateKeyAndSave(ev) {
     ev.preventDefault()
-
     try {
-      const decrypted = decrypt(privKeyInput, password)
+      let decrypted = decrypt(privKeyInput, password)
       setPrivKeyInput(nip19.nsecEncode(decrypted))
       browser.storage.local.set({
         private_key: bytesToHex(decrypted)
       })
-
       setTimeout(() => {
         setAskPassword(null)
       }, 2000)
+      setBchAddress(deriveBCHAddress(getPublicKey(bytesToHex(decrypted))))
     } catch (e) {
       showMessage(e.message)
     }
   }
-
   async function saveKey() {
     if (!isKeyValid()) {
       showMessage('PRIVATE KEY IS INVALID! did not save private key.')
@@ -457,7 +448,7 @@ function Options() {
     }
     let hexOrEmptyKey = privKeyInput
     try {
-      const { type, data } = nip19.decode(privKeyInput)
+      let {type, data} = nip19.decode(privKeyInput)
       if (type === 'nsec') hexOrEmptyKey = bytesToHex(data)
     } catch (_) {}
     await browser.storage.local.set({
@@ -468,7 +459,6 @@ function Options() {
     }
     showMessage('saved private key!')
   }
-
   function isKeyValid() {
     if (privKeyInput === '') return true
     try {
@@ -476,7 +466,6 @@ function Options() {
     } catch (_) {}
     return false
   }
-
   async function handleSelect(index) {
     if (selectedItems.includes(index)) {
       setSelectedItems(selectedItems.filter(i => i !== index))
@@ -484,40 +473,33 @@ function Options() {
       setSelectedItems([...selectedItems, index])
     }
   }
-
   function handleNotifications() {
     setNotifications(!showNotifications)
     addUnsavedChanges('notifications')
     if (!showNotifications) requestBrowserNotificationPermissions()
   }
-
   async function handleMultiRevoke() {
-    for (const index of selectedItems) {
-      const { host, accept, type } = policies[index]
+    for (let index of selectedItems) {
+      let {host, accept, type} = policies[index]
       await removePermissions(host, accept, type)
     }
-
     showMessage('removed selected policies')
     loadPermissions()
     setSelectedItems([])
   }
-
   async function requestBrowserNotificationPermissions() {
-    const granted = await browser.permissions.request({
+    let granted = await browser.permissions.request({
       permissions: ['notifications']
     })
     if (!granted) setNotifications(false)
   }
-
   async function saveNotifications() {
-    await browser.storage.local.set({ notifications: showNotifications })
+    await browser.storage.local.set({notifications: showNotifications})
     showMessage('saved notifications!')
   }
-
   function changeShowProtocolHandlerHelp() {
     setShowProtocolHandlerHelp(true)
   }
-
   function changeHandleNostrLinks() {
     if (handleNostrLinks) {
       setProtocolHandler('')
@@ -525,17 +507,14 @@ function Options() {
     } else setShowProtocolHandlerHelp(true)
     setHandleNostrLinks(!handleNostrLinks)
   }
-
   function handleChangeProtocolHandler(e) {
     setProtocolHandler(e.target.value)
     addUnsavedChanges('protocol_handler')
   }
-
   async function saveNostrProtocolHandlerSettings() {
-    await browser.storage.local.set({ protocol_handler: protocolHandler })
+    await browser.storage.local.set({protocol_handler: protocolHandler})
     showMessage('saved protocol handler!')
   }
-
   function addUnsavedChanges(section) {
     setUnsavedChanges(currentUnsavedChanges =>
       currentUnsavedChanges.includes(section)
@@ -543,9 +522,8 @@ function Options() {
         : [...currentUnsavedChanges, section]
     )
   }
-
   async function saveChanges() {
-    for (const section of unsavedChanges) {
+    for (let section of unsavedChanges) {
       switch (section) {
         case 'private_key':
           await saveKey()
@@ -561,5 +539,4 @@ function Options() {
     setUnsavedChanges([])
   }
 }
-
 createRoot(document.getElementById('main')).render(<Options />)
