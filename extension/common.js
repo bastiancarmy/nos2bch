@@ -1,9 +1,9 @@
 // extension/common.js
 import browser from 'webextension-polyfill'
-import { hexToBytes } from '@noble/hashes/utils'
-import { sha256 } from '@noble/hashes/sha256'
-import { ripemd160 } from '@noble/hashes/ripemd160'
+import { sha256 } from '@noble/hashes/sha2'
+import { ripemd160 } from '@noble/hashes/legacy'
 import { encode } from 'cashaddrjs'
+import { hexToBytes } from '@noble/hashes/utils'
 
 export const API_BASE = 'https://api.fullstack.cash/v5/electrumx/'
 
@@ -11,116 +11,50 @@ export const NO_PERMISSIONS_REQUIRED = {
   replaceURL: true
 }
 
-export const PERMISSION_NAMES = Object.fromEntries([
-  ['getPublicKey', 'read your public key'],
-  ['signEvent', 'sign events using your private key'],
-  ['nip04.encrypt', 'encrypt messages to peers'],
-  ['nip04.decrypt', 'decrypt messages from peers'],
-  ['nip44.encrypt', 'encrypt messages to peers'],
-  ['nip44.decrypt', 'decrypt messages from peers'],
-  ['getBCHAddress', 'get your BCH address'],
-  ['getBCHBalance', 'get your BCH balance'],
-  ['tipBCH', 'tip BCH using your key']
-])
-
-function matchConditions(conditions, type, params) {
-  if (type === 'signEvent') {
-    if (conditions?.kinds) {
-      if (params.kind in conditions.kinds) return true
-      else return false
-    }
-  } else if (type === 'tipBCH') {
-    if (conditions?.maxAmountSat) {
-      return params.amountSat <= conditions.maxAmountSat
-    }
+export async function getPermissionStatus(host, type, event) {
+  let { policies = {} } = await browser.storage.local.get('policies')
+  let accepts = policies[host]
+  if (!accepts) return null
+  if (type === 'signEvent' && accepts.true && accepts.true.signEvent) {
+    let conditions = accepts.true.signEvent.conditions
+    if (conditions?.kinds?.[event.kind] === true) return true
+  } else if (type === 'tipBCH' && accepts.true && accepts.true.tipBCH) {
+    let conditions = accepts.true.tipBCH.conditions
+    if (conditions?.max_amount === undefined || conditions.max_amount >= event.amountSat) return true
   }
-  return true
-}
-
-export async function getPermissionStatus(host, type, params) {
-  const { policies } = await browser.storage.local.get('policies')
-
-  const answers = ['true', 'false']
-  for (let i = 0; i < answers.length; i++) {
-    const accept = answers[i]
-    const { conditions } = policies?.[host]?.[accept]?.[type] || {}
-
-    if (matchConditions(conditions, type, params)) {
-      return accept === 'true'
-    }
-  }
-
-  return undefined
+  if (accepts.true?.[type]) return true
+  if (accepts.false?.[type]) return false
+  return null
 }
 
 export async function updatePermission(host, type, accept, conditions) {
-  const { policies = {} } = await browser.storage.local.get('policies')
-
-  // if the new conditions is "match everything", override the previous
-  if (Object.keys(conditions).length === 0) {
-    conditions = {}
-  } else {
-    // if we already had a policy for this, merge the conditions
-    const existingConditions = policies[host]?.[accept]?.[type]?.conditions
-    if (existingConditions) {
-      if (existingConditions.kinds && conditions.kinds) {
-        Object.keys(existingConditions.kinds).forEach(kind => {
-          conditions.kinds[kind] = true
-        })
-      } else if (existingConditions.maxAmountSat && conditions.maxAmountSat) {
-        conditions.maxAmountSat = Math.min(conditions.maxAmountSat, existingConditions.maxAmountSat)
-      }
-    }
-  }
-
-  // if we have a reverse policy (accept / reject) that is exactly equal to this, remove it
-  const other = !accept
-  const reverse = policies?.[host]?.[other]?.[type]
-  if (
-    reverse &&
-    JSON.stringify(reverse.conditions) === JSON.stringify(conditions)
-  ) {
-    delete policies[host][other][type]
-  }
-
-  // insert our new policy
-  policies[host] = policies[host] || {}
-  policies[host][accept] = policies[host][accept] || {}
-  policies[host][accept][type] = {
-    conditions,
-    created_at: Math.round(Date.now() / 1000)
-  }
-
-  browser.storage.local.set({ policies })
+  let { policies = {} } = await browser.storage.local.get('policies')
+  if (!policies[host]) policies[host] = {}
+  if (!policies[host][accept]) policies[host][accept] = {}
+  policies[host][accept][type] = { created_at: Math.round(Date.now() / 1000), conditions }
+  await browser.storage.local.set({ policies })
 }
 
 export async function removePermissions(host, accept, type) {
-  const { policies = {} } = await browser.storage.local.get('policies')
-  delete policies[host]?.[accept]?.[type]
-  browser.storage.local.set({ policies })
+  let { policies = {} } = await browser.storage.local.get('policies')
+  if (policies[host]?.[accept]?.[type]) {
+    delete policies[host][accept][type]
+    if (Object.keys(policies[host][accept]).length === 0) delete policies[host][accept]
+    if (Object.keys(policies[host]).length === 0) delete policies[host]
+    await browser.storage.local.set({ policies })
+  }
 }
 
-export async function showNotification(host, answer, type, params) {
-  const { notifications } = await browser.storage.local.get('notifications')
-  if (notifications) {
-    const action = answer ? 'allowed' : 'denied'
-    browser.notifications.create(undefined, {
-      type: 'basic',
-      title: `${type} ${action} for ${host}`,
-      message: JSON.stringify(
-        params?.event
-          ? {
-              kind: params.event.kind,
-              content: params.event.content,
-              tags: params.event.tags
-            }
-          : params,
-        null,
-        2
-      ),
-      iconUrl: 'icons/48x48.png'
-    })
-  }
+export async function showNotification(host, allowed, type, params) {
+  let { notifications } = await browser.storage.local.get('notifications')
+  if (!notifications) return
+  if (typeof browser.notifications === 'undefined') return
+  browser.notifications.create(Math.random().toString().slice(4), {
+    type: 'basic',
+    message: `${host} ${allowed ? 'now has' : 'was denied'} access to method nostr.${type}`,
+    title: `${allowed ? 'ALLOWED' : 'DENIED'} ${type.toUpperCase()}`,
+    iconUrl: 'icons/48x48.png'
+  })
 }
 
 export async function getPosition(width, height) {
