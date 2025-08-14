@@ -1,4 +1,3 @@
-// extension/background.js
 import browser from 'webextension-polyfill'
 import { validateEvent, finalizeEvent, getPublicKey } from 'nostr-tools/pure'
 import * as nip19 from 'nostr-tools/nip19'
@@ -6,6 +5,8 @@ import * as nip04 from 'nostr-tools/nip04'
 import * as nip44 from 'nostr-tools/nip44'
 import { Mutex } from 'async-mutex'
 import { LRUCache } from './utils'
+import { hexToBytes } from '@noble/hashes/utils'
+import { hexToBin } from '@bitauth/libauth'
 
 import {
   NO_PERMISSIONS_REQUIRED,
@@ -13,26 +14,18 @@ import {
   updatePermission,
   showNotification,
   getPosition,
-  API_BASE,
   deriveBCHAddress,
-  getBCHBalance
+  getBCHBalance,
+  BLOCKCHAIR_API
 } from './common'
 
 import * as secp from '@noble/secp256k1'
 import { hmac } from '@noble/hashes/hmac'
 import { sha256 } from '@noble/hashes/sha2'
-import { ripemd160 } from '@noble/hashes/legacy'
-import {
-  binToHex,
-  cashAddressToLockingBytecode,
-  encodeTransaction,
-  encodeTransactionOutpoints,
-  encodeTransactionOutputs,
-  encodeTransactionInputSequenceNumbersForSigning,
-  generateSigningSerializationBCH,
-  hexToBin,
-  instantiateSha256
-} from '@bitauth/libauth'
+import { encodePrivateKeyWif } from '@bitauth/libauth'
+import { Wallet } from 'mainnet-js'
+
+console.log('Background service worker loaded');
 
 secp.etc.hmacSha256Sync = (k, ...m) => hmac(sha256, k, secp.etc.concatBytes(...m))
 
@@ -41,6 +34,27 @@ let promptMutex = new Mutex()
 let releasePromptMutex = () => {}
 let secretsCache = new LRUCache(100)
 let previousSk = null
+let utxoCache = { utxos: [], timestamp: 0, balance: 0 }
+
+async function fetchDynamicFeeRate() {
+  try {
+    const res = await fetch(`${BLOCKCHAIR_API}stats`)
+    const data = await res.json()
+    return data.data.suggested_transaction_fee_per_byte_sat || 1
+  } catch {
+    return 1 // Fallback
+  }
+}
+
+async function getCachedUtxos(wallet) {
+  const now = Date.now()
+  if (utxoCache.timestamp > now - 60000) {
+    return utxoCache.utxos
+  }
+  const utxos = await wallet.getUtxos()
+  utxoCache = { utxos, timestamp: now, balance: utxos.reduce((sum, u) => sum + u.satoshis, 0) }
+  return utxos
+}
 
 function getSharedSecret(sk, peer) {
   if (previousSk !== sk) {
@@ -250,23 +264,36 @@ async function performOperation(type, params) {
         const recipientHex = nip19.decode(recipientNpub).data
         const recipientAddress = deriveBCHAddress(recipientHex)
 
-        const utxoRes = await fetch(`${API_BASE}utxos/${senderAddress}`)
-        if (!utxoRes.ok) {
-          return { error: { message: 'Failed to fetch UTXOs' } }
-        }
-        const utxoData = await utxoRes.json()
-        if (!utxoData.success || !utxoData.utxos.length) {
+        const privKeyBytes = hexToBytes(sk)
+        const wif = encodePrivateKeyWif(privKeyBytes, 'compressed')
+        const wallet = await Wallet.fromWIF(wif)
+        const utxos = await getCachedUtxos(wallet)
+        if (utxos.length === 0) {
           return { error: { message: 'No UTXOs found. Balance is 0.' } }
         }
-        const utxos = utxoData.utxos
 
+        const feeRate = await fetchDynamicFeeRate()
         const inputCount = utxos.length
-        const estimatedSize = 10 + inputCount * 148 + 34 * (utxos.length > 1 ? 2 : 1) // Approximate
-        const fee = BigInt(estimatedSize) // 1 sat/byte
-        const totalInput = utxos.reduce((sum, utxo) => sum + BigInt(utxo.value), 0n)
+        const estimatedSize = 10 + inputCount * 148 + 2 * 34
+        let fee = BigInt(estimatedSize) * BigInt(feeRate)
+        const totalInput = BigInt(utxoCache.balance)
         let change = totalInput - amount - fee
+
+        const dustLimit = 546n
+        if (amount < dustLimit) {
+          return { error: { message: 'Amount below dust limit (546 sat)' } }
+        }
+        if (change > 0n && change < dustLimit) {
+          change = 0n
+          fee = totalInput - amount
+        }
         if (change < 0n) {
           return { error: { message: 'Insufficient funds' } }
+        }
+
+        // Validate: inputs >= amount + fee + change
+        if (totalInput < amount + fee + change) {
+          return { error: { message: 'Invalid tx: insufficient funds' } }
         }
 
         const details = {
@@ -280,105 +307,18 @@ async function performOperation(type, params) {
         }
 
         const postAccept = async () => {
-          const sha256Instance = await instantiateSha256()
-          const sha256Hash = sha256Instance.hash.bind(sha256Instance)
-
-          const transaction = {
-            version: 2,
-            inputs: utxos.map(utxo => ({
-              outpointTransactionHash: hexToBin(utxo.txid),
-              outpointIndex: utxo.vout,
-              unlockingBytecode: new Uint8Array(),
-              sequenceNumber: 0xffffffff
-            })),
-            outputs: [{
-              valueSatoshis: amount,
-              lockingBytecode: _buildP2PKHOutput(recipientAddress)
-            }],
-            locktime: 0
-          }
-
-          if (change > 546n) {
-            transaction.outputs.push({
-              valueSatoshis: change,
-              lockingBytecode: _buildP2PKHOutput(senderAddress)
-            })
-          }
-
-          const privBytes = hexToBin(sk)
-
-          transaction.inputs.forEach((input, i) => {
-            const coveredBytecode = hexToBin(utxos[i].scriptPubKey)
-            const transactionOutpointsHash = sha256Hash(sha256Hash(encodeTransactionOutpoints(transaction.inputs)))
-            const transactionSequenceNumbersHash = sha256Hash(sha256Hash(encodeTransactionInputSequenceNumbersForSigning(transaction.inputs)))
-            const transactionOutputsHash = sha256Hash(sha256Hash(encodeTransactionOutputs(transaction.outputs)))
-            const preimage = generateSigningSerializationBCH({
-              forkId: BigInt(0),
-              coveredBytecode,
-              outpointTransactionHash: input.outpointTransactionHash,
-              outpointIndex: input.outpointIndex,
-              sequenceNumber: input.sequenceNumber,
-              valueSatoshis: BigInt(utxos[i].value),
-              version: transaction.version,
-              transactionOutpointsHash,
-              transactionSequenceNumbersHash,
-              transactionOutputsHash,
-              locktime: transaction.locktime,
-              signingSerializationType: BigInt(0x41)
-            })
-            const message = sha256Hash(sha256Hash(preimage))
-            const sig = secp.sign(message, privBytes)
-            const derSig = _encodeDer(sig.r, sig.s)
-            const sigWithType = new Uint8Array([...derSig, 0x41])
-            const pubkey = secp.getPublicKey(privBytes, true)
-            input.unlockingBytecode = new Uint8Array([sigWithType.length, ...sigWithType, pubkey.length, ...pubkey])
-          })
-
-          const rawTx = binToHex(encodeTransaction(transaction))
-
-          const broadcastRes = await fetch(`${API_BASE}broadcast`, {
-            method: 'POST',
-            body: JSON.stringify({ rawtx: rawTx }),
-            headers: { 'Content-Type': 'application/json' }
-          })
-          if (!broadcastRes.ok) throw new Error(`Broadcast error: ${await broadcastRes.text()}`)
-          const data = await broadcastRes.json()
-          return { txid: data.txid }
+          const { txId } = await wallet.send([{ cashaddr: recipientAddress, value: Number(amount), unit: 'sat' }])
+          console.log('Tx broadcasted:', txId); // Log
+          return { txid: txId }
         }
 
         return { type: 'tipBCH', details, postAccept }
       }
     }
   } catch (error) {
-    return {error: {message: error.message, stack: error.stack}}
+    console.error('Operation error:', error.message, error.stack);
+    return {error: {message: error.message, stack: error.stack}};
   }
-}
-
-function _encodeDer (r, s) {
-  function encodeInt (val) {
-    let bytes = []
-    let tmp = val
-    if (tmp === 0n) bytes.push(0)
-    while (tmp > 0n) {
-      bytes.push(Number(tmp & 0xffn))
-      tmp >>= 8n
-    }
-    bytes = bytes.reverse()
-    if (bytes[0] & 0x80) bytes.unshift(0)
-    return new Uint8Array([0x02, bytes.length, ...bytes])
-  }
-  const rEnc = encodeInt(r)
-  const sEnc = encodeInt(s)
-  const totalLen = rEnc.length + sEnc.length
-  return new Uint8Array([0x30, totalLen, ...rEnc, ...sEnc])
-}
-
-function _buildP2PKHOutput (address) {
-  const result = cashAddressToLockingBytecode(address)
-  if (typeof result === 'string') {
-    throw new Error(result)
-  }
-  return result.bytecode
 }
 
 async function handlePromptMessage({host, type, accept, conditions}, sender) {

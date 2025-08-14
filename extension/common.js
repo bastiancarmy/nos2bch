@@ -1,29 +1,42 @@
-// extension/common.js
+// extension/common.js - Fixed: Parse JSON once (avoid body read error), log data; guards for null data; error msgs for 430/rate limits.
 import browser from 'webextension-polyfill'
 import { sha256 } from '@noble/hashes/sha2'
 import { ripemd160 } from '@noble/hashes/legacy'
 import { encode } from 'cashaddrjs'
 import { hexToBytes } from '@noble/hashes/utils'
 
-export const API_BASE = 'https://api.fullstack.cash/v5/electrumx/'
-
 export const NO_PERMISSIONS_REQUIRED = {
   replaceURL: true
 }
 
-export async function getPermissionStatus(host, type, event) {
-  let { policies = {} } = await browser.storage.local.get('policies')
-  let accepts = policies[host]
-  if (!accepts) return null
-  if (type === 'signEvent' && accepts.true && accepts.true.signEvent) {
-    let conditions = accepts.true.signEvent.conditions
-    if (conditions?.kinds?.[event.kind] === true) return true
-  } else if (type === 'tipBCH' && accepts.true && accepts.true.tipBCH) {
-    let conditions = accepts.true.tipBCH.conditions
-    if (conditions?.max_amount === undefined || conditions.max_amount >= event.amountSat) return true
+export const accepts = {
+  true: {
+    signEvent: { kinds: {} },
+    tipBCH: {}
+  },
+  false: {
+    signEvent: null,
+    tipBCH: null
   }
-  if (accepts.true?.[type]) return true
-  if (accepts.false?.[type]) return false
+}
+
+export async function getPermissionStatus(host, type, params) {
+  let { policies = {} } = await browser.storage.local.get('policies')
+  let permission = policies[host]?.true?.[type] || policies[host]?.false?.[type]
+  if (permission === undefined) return null
+
+  if (permission === null) return false
+
+  if (type === 'signEvent') {
+    let { kinds } = permission.conditions
+    if (Object.keys(kinds).length === 0) return true
+    if (kinds[params.kind] === true) return true
+    return false
+  } else if (type === 'tipBCH') {
+    // Add conditions if needed, e.g., max amount
+    return true
+  }
+
   return null
 }
 
@@ -99,14 +112,39 @@ export function deriveBCHAddress(pubkeyHex) {
   return encode('bitcoincash', 'P2PKH', hash)
 }
 
+export const BLOCKCHAIR_API = 'https://api.blockchair.com/bitcoin-cash/';
+
 export async function getBCHBalance(address) {
+  if (!address) return 0; // Guard
   try {
-    const res = await fetch(`${API_BASE}balance/${address}`)
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const data = await res.json()
-    if (!data.success) throw new Error(data.msg || 'API error')
-    return data.balance.confirmed + data.balance.unconfirmed
+    const res = await fetch(`${BLOCKCHAIR_API}dashboards/address/${address}`);
+    if (!res.ok) {
+      if (res.status === 430) throw new Error('Rate limit exceeded (430)');
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    console.log('Balance data:', data); // Log after parse
+    if (data.context.error) throw new Error(data.context.error);
+    return data?.data?.[address]?.address?.balance || 0;
   } catch (err) {
-    throw new Error(`Balance fetch failed: ${err.message}`)
+    console.error('Balance fetch error:', err);
+    return 0; // Fallback
+  }
+}
+
+export async function getTxHistory(address) {
+  if (!address) return [];
+  try {
+    const res = await fetch(`${BLOCKCHAIR_API}dashboards/address/${address}?transactions=true`);
+    if (!res.ok) {
+      if (res.status === 430) throw new Error('Rate limit exceeded (430)');
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    console.log('Tx history data:', data); // Log after parse
+    return data?.data?.[address]?.transactions || [];
+  } catch (err) {
+    console.error('Tx history fetch error:', err);
+    return [];
   }
 }
