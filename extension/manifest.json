@@ -1,4 +1,3 @@
-// Updated manifest.json: Add CSP to allow WebAssembly in extension pages (options/popup)
 {
   "name": "nos2bch",
   "description": "Nostr signer extension with BCH tipping",

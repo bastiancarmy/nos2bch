@@ -6,10 +6,9 @@ import {decrypt, encrypt} from 'nostr-tools/nip49'
 import {generateSecretKey} from 'nostr-tools/pure'
 import React, {useEffect, useState} from 'react'
 import {createRoot} from 'react-dom/client'
-import QRCode from 'react-qr-code'
+import { QRCodeSVG } from 'qrcode.react'  // Switched to qrcode.react with named import for ESM/React 19 compat; install if needed: yarn add qrcode.react
 import browser from 'webextension-polyfill'
 import {removePermissions, deriveBCHAddress, getBCHBalance, getTxHistory} from './common'
-import {encodePrivateKeyWif} from '@bitauth/libauth'
 
 class ErrorBoundary extends React.Component {
   state = { hasError: false };
@@ -37,7 +36,8 @@ function Options() {
   let [bchAddress, setBchAddress] = useState(null)
   let [bchBalance, setBchBalance] = useState(null)
   let [txHistory, setTxHistory] = useState([])
-  let [loading, setLoading] = useState(true) // New: For initial load
+  let [loading, setLoading] = useState(true) // For initial load
+  let [balanceLoading, setBalanceLoading] = useState(false) // Separate for balance retry
 
   const showMessage = msg => {
     setMessages(oldMessages => [...oldMessages, msg])
@@ -51,7 +51,7 @@ function Options() {
   }, [messages, setMessages])
   useEffect(() => {
     browser.storage.local
-      .get(['private_key', 'protocol_handler', 'notifications'])
+      .get(['private_key', 'protocol_handler', 'notifications', 'lastBchBalance', 'lastBchBalanceTime'])
       .then(results => {
         console.log('Options storage loaded:', results); // Debug
         if (results.private_key) {
@@ -62,7 +62,20 @@ function Options() {
           let pubHex = getPublicKey(prvKey)
           let address = deriveBCHAddress(pubHex)
           setBchAddress(address)
-          getBCHBalance(address).then(balance => setBchBalance(balance)).catch(err => setBchBalance('Error: ' + err.message))
+          // Cached balance to avoid API limits
+          if (results.lastBchBalanceTime && Date.now() - results.lastBchBalanceTime < 600000) { // 10 min cache
+            setBchBalance(results.lastBchBalance)
+          } else {
+            setBalanceLoading(true)
+            getBCHBalance(address).then(balance => {
+              setBchBalance(balance)
+              browser.storage.local.set({lastBchBalance: balance, lastBchBalanceTime: Date.now()})
+              setBalanceLoading(false)
+            }).catch(err => {
+              setBchBalance('Error: ' + err.message)
+              setBalanceLoading(false)
+            })
+          }
           getTxHistory(address).then(history => setTxHistory(history)).catch(() => setTxHistory([]))
         } else {
           browser.runtime.openOptionsPage(); // Auto-open if no key
@@ -175,10 +188,10 @@ function Options() {
                     marginTop: '5px'
                   }}
                 >
-                  <QRCode
+                  <QRCodeSVG
+                    value={privKeyInput.toUpperCase()}
                     size={256}
                     style={{height: 'auto', maxWidth: '100%', width: '100%'}}
-                    value={privKeyInput.toUpperCase()}
                     viewBox={`0 0 256 256`}
                   />
                 </div>
@@ -186,7 +199,7 @@ function Options() {
             {bchAddress && (
               <div>
                 <div>BCH Address (from npub): {bchAddress}</div>
-                <div>BCH Balance: {bchBalance !== null ? bchBalance + ' sat' : 'Loading...'}</div>
+                <div>BCH Balance: {bchBalance !== null ? bchBalance + ' sat' : (balanceLoading ? 'Loading...' : 'Error loading balance')}</div> {/* Separate loading state */}
               </div>
             )}
             {/* Added Tx History section */}

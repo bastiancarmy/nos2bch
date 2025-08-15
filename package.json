@@ -5,6 +5,7 @@
     "lint": "eslint . --ext .js,.jsx --fix",
     "build": "node build.mjs prod",
     "build:dev": "node build.mjs",
+    "build:prod": "node build.mjs prod",
     "start": "yarn build:dev"
   },
   "dependencies": {
@@ -16,7 +17,6 @@
     "cashaddrjs": "^0.4.4",
     "esbuild": "^0.25.0",
     "esbuild-plugin-copy": "^2.1.1",
-    "esbuild-plugin-polyfill-node": "^0.3.0",
     "esbuild-sass-plugin": "^3.3.1",
     "eslint": "^8.6.0",
     "eslint-plugin-babel": "^5.3.1",
@@ -30,7 +30,6 @@
     "qrcode.react": "^4.2.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "react-qr-code": "^2.0.18",
     "use-debounce": "^7.0.1",
     "webextension-polyfill": "^0.12.0"
   },
