@@ -78,7 +78,7 @@ function Prompt() {
           <div>Change: {details.changeSat} sat</div>
           <label>
             <input type="checkbox" checked={always} onChange={toggleAlways} />
-            always allow up to 
+            always allow up to
             <input type="number" value={maxAmount} onChange={e => setMaxAmount(parseInt(e.target.value))} style={{width: '80px', marginLeft: '5px'}} /> sat
           </label>
         </div>

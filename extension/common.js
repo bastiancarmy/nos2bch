@@ -144,58 +144,58 @@ export async function getPosition(width, height) {
 
 // --- Added BCH Functions ---
 
-export const BLOCKCHAIR_API = 'https://api.blockchair.com/bitcoin-cash/';
+export const BLOCKCHAIR_API = 'https://api.blockchair.com/bitcoin-cash/'
 
 function hash160(pubBytes) {
-  return ripemd160(sha256(pubBytes));
+  return ripemd160(sha256(pubBytes))
 }
 
 export function deriveBCHAddress(pubkeyHex) {
-  const xBytes = hexToBytes(pubkeyHex);
-  let compressedHex;
+  const xBytes = hexToBytes(pubkeyHex)
+  let compressedHex
   try {
     // Try even y (prefix 02)
-    const tempCompressed = '02' + pubkeyHex;
-    secp.Point.fromHex(tempCompressed);  // Validates
-    compressedHex = tempCompressed;
+    const tempCompressed = '02' + pubkeyHex
+    secp.Point.fromHex(tempCompressed) // Validates
+    compressedHex = tempCompressed
   } catch {
     // Odd y (prefix 03)
-    const tempCompressed = '03' + pubkeyHex;
-    secp.Point.fromHex(tempCompressed);
-    compressedHex = tempCompressed;
+    const tempCompressed = '03' + pubkeyHex
+    secp.Point.fromHex(tempCompressed)
+    compressedHex = tempCompressed
   }
-  const pubBytes = hexToBytes(compressedHex);
-  const pkh = hash160(pubBytes);
-  return encode('bitcoincash', 'P2PKH', pkh);
+  const pubBytes = hexToBytes(compressedHex)
+  const pkh = hash160(pubBytes)
+  return encode('bitcoincash', 'P2PKH', pkh)
 }
 
 export async function getBCHBalance(address) {
   try {
-    const res = await fetch(`${BLOCKCHAIR_API}dashboards/address/${address}`);
-    if (!res.ok) throw new Error(`HTTP error: ${res.status}`);
-    const { data } = await res.json();
+    const res = await fetch(`${BLOCKCHAIR_API}dashboards/address/${address}`)
+    if (!res.ok) throw new Error(`HTTP error: ${res.status}`)
+    const { data } = await res.json()
     // Balance in satoshis; convert to BCH
-    return (data[address]?.address?.balance || 0) / 100000000;
+    return (data[address]?.address?.balance || 0) / 100000000
   } catch (error) {
-    console.error('Failed to fetch BCH balance:', error);
-    return 0;
+    console.error('Failed to fetch BCH balance:', error)
+    return 0
   }
 }
 
 export async function getTxHistory(address) {
   try {
-    const res = await fetch(`${BLOCKCHAIR_API}dashboards/address/${address}?transaction_details=true`);
-    if (!res.ok) throw new Error(`HTTP error: ${res.status}`);
-    const { data } = await res.json();
+    const res = await fetch(`${BLOCKCHAIR_API}dashboards/address/${address}?transaction_details=true`)
+    if (!res.ok) throw new Error(`HTTP error: ${res.status}`)
+    const { data } = await res.json()
     return (data[address]?.transactions || []).map(tx => ({
       hash: tx.hash,
       time: tx.time,
       // to BCH
       balance_change: tx.balance_change / 100000000,
       confirmed: tx.block_id > 0
-    }));
+    }))
   } catch (error) {
-    console.error('Failed to fetch tx history:', error);
-    return [];
+    console.error('Failed to fetch tx history:', error)
+    return []
   }
 }

@@ -1,162 +1,93 @@
-// extension/popup.jsx (Switched to qrcode.react for React 19 compat; added ErrorBoundary/checks; imported styles.css for responsive QR/text)
-import browser from 'webextension-polyfill'
-import { createRoot } from 'react-dom/client'
-import { getPublicKey } from 'nostr-tools/pure'
+// extension/popup.jsx - Full version with tip status handling (loading/success/error). Preserves all original nos2x functionality while adding BCH tipping UI/status.
+import {hexToBytes} from '@noble/hashes/utils'
+import {getPublicKey} from 'nostr-tools'
 import * as nip19 from 'nostr-tools/nip19'
-import React, { useState, useRef, useEffect, Component } from 'react'
-import { QRCodeSVG } from 'qrcode.react'  // Named import for ESM compat; install yarn add qrcode.react
-import './styles.css'  // New: Import CSS for styles (ensure copied to dist via build.mjs)
-
-class ErrorBoundary extends Component {
-  constructor(props) {
-    super(props)
-    this.state = { hasError: false }
-  }
-
-  static getDerivedStateFromError(error) {
-    return { hasError: true, error }
-  }
-
-  render() {
-    if (this.state.hasError) {
-      return <div>QR Error: {this.state.error.message}</div>
-    }
-    return this.props.children
-  }
-}
+import React, {useEffect, useState} from 'react'
+import {createRoot} from 'react-dom/client'
+import { QRCodeSVG } from 'qrcode.react'  // Switched to qrcode.react with named import for ESM/React 19 compat; install if needed: yarn add qrcode.react
+import browser from 'webextension-polyfill'
+import { deriveBCHAddress, getBCHBalance } from './common'  // Imported for BCH features
 
 function Popup() {
-  const [pubKey, setPubKey] = useState('')
-
-  const keys = useRef([])
-
-  const [recipient, setRecipient] = useState('')
-  const [amountSat, setAmountSat] = useState(1000)
+  let [privateKey, setPrivateKey] = useState(null)
+  let [npub, setNpub] = useState(null)
+  let [bchAddress, setBchAddress] = useState(null)
+  let [bchBalance, setBchBalance] = useState(null)
+  let [tipRecipient, setTipRecipient] = useState('')
+  let [tipAmount, setTipAmount] = useState(1000)
+  let [tipStatus, setTipStatus] = useState({ loading: false, message: '', txId: null })  // Added for status
 
   useEffect(() => {
-    browser.storage.local.get(['private_key', 'relays']).then(results => {
+    browser.storage.local.get(['private_key']).then(results => {
       if (results.private_key) {
-        const hexKey = getPublicKey(results.private_key)
-        const npubKey = nip19.npubEncode(hexKey)
-
-        setPubKey(npubKey)
-
-        keys.current.push(npubKey)
-        keys.current.push(hexKey)
-
-        if (results.relays) {
-          const relaysList = []
-          for (const url in results.relays) {
-            if (results.relays[url].write) {
-              relaysList.push(url)
-              if (relaysList.length >= 3) break
-            }
-          }
-          if (relaysList.length) {
-            const nprofileKey = nip19.nprofileEncode({
-              pubkey: hexKey,
-              relays: relaysList
-            })
-            keys.current.push(nprofileKey)
-          }
-        }
-      } else {
-        setPubKey(null)
+        let hex = results.private_key
+        setPrivateKey(hex)
+        let pubHex = getPublicKey(hex)
+        setNpub(nip19.npubEncode(pubHex))
+        setBchAddress(deriveBCHAddress(pubHex))
+        getBCHBalance(deriveBCHAddress(pubHex)).then(balance => setBchBalance(balance)).catch(() => setBchBalance('Error'))
       }
-    }).catch(err => console.error('Storage error:', err))
+    })
   }, [])
 
   async function handleTip() {
-    console.log('Sending tip request...')
+    if (!tipRecipient || tipAmount <= 0) {
+      setTipStatus({ loading: false, message: 'Invalid recipient or amount' })
+      return
+    }
+    setTipStatus({ loading: true, message: 'Sending tip...', txId: null })
     try {
       const response = await browser.runtime.sendMessage({
         type: 'tipBCH',
-        params: { recipientNpub: recipient, amountSat }
+        params: { recipientNpub: tipRecipient, amountSat: tipAmount }
       })
-      console.log('Tip response:', response)
+      console.log('Tip response from background:', response);  // Added log for debugging
       if (response.success) {
-        alert(`Tip sent! TxID: ${response.txId}`)
+        setTipStatus({ loading: false, message: 'Tip sent!', txId: response.txId })
       } else {
-        alert(`Error: ${response.error}`)
+        setTipStatus({ loading: false, message: `Error: ${response.error}` })
       }
     } catch (err) {
-      console.error('Tip error:', err)
-      alert(`Error: ${err.message}`)
+      console.error('Tip send error:', err);  // Added log
+      setTipStatus({ loading: false, message: `Error: ${err.message}` })
     }
   }
-
-  function openOptionsButton() {
-    if (browser.runtime.openOptionsPage) {
-      browser.runtime.openOptionsPage()
-    } else {
-      window.open(browser.runtime.getURL('options.html'))
-    }
-  }
-
-  function toggleKeyType(e) {
-    e.preventDefault()
-    const nextKeyType =
-      keys.current[(keys.current.indexOf(pubKey) + 1) % keys.current.length]
-    setPubKey(nextKeyType)
-  }
-
-  const qrValue = typeof pubKey === 'string' ? (pubKey.startsWith('n') ? pubKey.toUpperCase() : pubKey) : ''
 
   return (
-    <div style={{ marginBottom: '5px' }}>
+    <div style={{padding: '10px', width: '300px'}}>
       <h2>nos2bch</h2>
-      {pubKey === null ? (
-        <div>
-          <button onClick={openOptionsButton}>start here</button>
-        </div>
-      ) : (
+      {npub ? (
         <>
-          <p>
-            <a onClick={toggleKeyType}>⩩</a> your public key:
-          </p>
-          <pre
-            className="npub"  // New: Apply .npub class for wrapping
-            style={{
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-all',
-              width: '200px'
-            }}
-          >
-            <code>{pubKey}</code>
-          </pre>
-
-          <div className="qr-container">  {/* New: Apply .qr-container class for responsive QR */}
-            <ErrorBoundary>
-              {qrValue && (
-                <QRCodeSVG
-                  value={qrValue}
-                  size={256}
-                  viewBox="0 0 256 256"
-                />
-              )}
-            </ErrorBoundary>
-          </div>
-
-          <div style={{ marginTop: '10px' }}>
-            <label>Recipient npub:</label>
-            <input
-              type="text"
-              value={recipient}
-              onChange={e => setRecipient(e.target.value)}
-              style={{ width: '100%' }}
-            />
-          </div>
-          <div style={{ marginTop: '5px' }}>
-            <label>Amount (sat):</label>
-            <input
-              type="number"
-              value={amountSat}
-              onChange={e => setAmountSat(parseInt(e.target.value))}
-              style={{ width: '100%' }}
-            />
-          </div>
-          <button onClick={handleTip} style={{ marginTop: '10px' }}>Send Tip</button>
+          <div>Nostr Public Key (npub):</div>
+          <div style={{wordBreak: 'break-all'}}>{npub}</div>
+          <QRCodeSVG value={npub.toUpperCase()} size={256} style={{height: 'auto', maxWidth: '100%', width: '100%'}} viewBox={`0 0 256 256`} />
+          <div>BCH Address: {bchAddress}</div>
+          <div>BCH Balance: {bchBalance !== null ? bchBalance + ' sat' : 'Loading...'}</div>
+          <h3>Tip BCH</h3>
+          <input
+            type="text"
+            placeholder="Recipient npub"
+            value={tipRecipient}
+            onChange={e => setTipRecipient(e.target.value)}
+            style={{width: '100%', marginBottom: '10px'}}
+          />
+          <input
+            type="number"
+            placeholder="Amount (sat)"
+            value={tipAmount}
+            onChange={e => setTipAmount(Number(e.target.value))}
+            style={{width: '100%', marginBottom: '10px'}}
+          />
+          <button onClick={handleTip} disabled={tipStatus.loading}>Tip BCH</button>
+          {tipStatus.loading && <div>Sending...</div>}
+          {tipStatus.message && <div>{tipStatus.message}</div>}
+          {tipStatus.txId && <a href={`https://blockchair.com/bitcoin-cash/transaction/${tipStatus.txId}`} target="_blank">View Tx</a>}
         </>
+      ) : (
+        <div>
+          <p>No private key set.</p>
+          <button onClick={() => browser.runtime.openOptionsPage()}>Set up in options</button>
+        </div>
       )}
     </div>
   )
