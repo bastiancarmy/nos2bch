@@ -1,4 +1,5 @@
-// extension/options.jsx - Merged version: Preserves all original nos2x functionality (key management, permissions, protocol handler, notifications) while adding BCH features (address, balance, Tx history). Bug-free with loading states, fallbacks, guards, and error handling.
+// extension/options.jsx - Updated QR code rendering to match popup method: Removed wrapping div; applied size=256 directly with margin style on QRCodeSVG for spacing/consistency. Kept level="H" for better error correction on long keys (optional but recommended; can remove if strict match needed). Consolidated handling—no multiple imports, same as popup (QRCodeSVG from qrcode.react). Preserved all other functionality.
+
 import {bytesToHex, hexToBytes} from '@noble/hashes/utils'
 import {getPublicKey} from 'nostr-tools'
 import * as nip19 from 'nostr-tools/nip19'
@@ -6,7 +7,7 @@ import {decrypt, encrypt} from 'nostr-tools/nip49'
 import {generateSecretKey} from 'nostr-tools/pure'
 import React, {useEffect, useState} from 'react'
 import {createRoot} from 'react-dom/client'
-import { QRCodeSVG } from 'qrcode.react'  // Switched to qrcode.react with named import for ESM/React 19 compat; install if needed: yarn add qrcode.react
+import { QRCodeSVG } from 'qrcode.react' // Switched to qrcode.react with named import for ESM/React 19 compat; install if needed: yarn add qrcode.react
 import browser from 'webextension-polyfill'
 import {removePermissions, deriveBCHAddress, getBCHBalance, getTxHistory} from './common'
 
@@ -38,7 +39,6 @@ function Options() {
   let [txHistory, setTxHistory] = useState([])
   let [loading, setLoading] = useState(true) // For initial load
   let [balanceLoading, setBalanceLoading] = useState(false) // Separate for balance retry
-
   const showMessage = msg => {
     setMessages(oldMessages => [...oldMessages, msg])
   }
@@ -97,7 +97,6 @@ function Options() {
   useEffect(() => {
     loadPermissions()
   }, [])
-
   async function loadPermissions() {
     let {policies = {}} = await browser.storage.local.get('policies')
     let list = []
@@ -116,11 +115,9 @@ function Options() {
     })
     setPermissions(list)
   }
-
   if (loading) {
     return <div>Loading options...</div>; // Spinner/message during load
   }
-
   return (
     <>
       <h1 style={{fontSize: '25px', marginBlockEnd: '0px'}}>nos2bch</h1> {/* Fixed to nos2bch */}
@@ -180,21 +177,12 @@ function Options() {
             {!hidingPrivateKey &&
               privKeyInput !== '' &&
               (privKeyInput.startsWith('ncryptsec1') || isKeyValid()) && (
-                <div
-                  style={{
-                    height: 'auto',
-                    maxWidth: 256,
-                    width: '100%',
-                    marginTop: '5px'
-                  }}
-                >
-                  <QRCodeSVG
-                    value={privKeyInput.toUpperCase()}
-                    size={256}
-                    style={{height: 'auto', maxWidth: '100%', width: '100%'}}
-                    viewBox={`0 0 256 256`}
-                  />
-                </div>
+                <QRCodeSVG
+                  value={privKeyInput.toUpperCase()}
+                  size={256}
+                  level="H"  // Higher error correction for long strings (kept for reliability; remove if not needed)
+                  style={{margin: '10px 0'}}
+                />
               )}
             {bchAddress && (
               <div>

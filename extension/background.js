@@ -1,4 +1,4 @@
-// extension/background.js - Full version with fixes/enhancements for tipping. Preserves all original nos2x functionality (key management, permissions, protocol handler, notifications) while fixing/enhancing BCH tipping (balance check, dynamic fees, UTXO selection, error handling, side-effect protection).
+// extension/background.js - Full version with fixes/enhancements for tipping. Preserves all original nos2x functionality (key management, permissions, protocol handler, notifications) while fixing/enhancing BCH tipping (balance check, dynamic fees, UTXO selection, error handling, side-effect protection). Now using Electrum for all BCH ops.
 import browser from 'webextension-polyfill' // Added for browser API polyfill
 import {getPublicKey, finalizeEvent, verifyEvent} from 'nostr-tools/pure' // Changed to 'pure'; validateEvent -> verifyEvent
 import {nip04, nip19} from 'nostr-tools' // Removed unused getPk; nip19 is correct
@@ -13,39 +13,51 @@ import {
   updatePermission,
   showNotification,
   getPosition,
-  getBCHBalance // Imported for balance check
+  getBCHBalance, // Imported for balance check
+  getFeeRate,
+  getUtxos,
+  broadcastTx
 } from './common'
 import * as secp from '@noble/secp256k1'
 import { hmac } from '@noble/hashes/hmac'
 import { sha256 } from '@noble/hashes/sha256'
 import { ripemd160 } from '@noble/hashes/ripemd160'
-const API_BASE = 'https://api.fullstack.cash/v5/electrumx/'
-const BLOCKCHAIR_API = 'https://api.blockchair.com/bitcoin-cash/' // Added for fees/stats
-console.log('Background script starting to load...'); // Debug log for registration
+
+console.log('Background script starting to load...');  // Debug log for registration
+
 // Enable sync methods in secp
 secp.etc.hmacSha256Sync = (k, ...m) => hmac(sha256, k, secp.etc.concatBytes(...m))
+
 let openPrompt = null
 let promptMutex = new Mutex()
 let releasePromptMutex = () => {}
 let secretsCache = new LRUCache(100)
 let previousSk = null
+
 function getSharedSecret(sk, peer) {
   if (previousSk !== sk) {
     secretsCache.clear()
   }
+
   let key = secretsCache.get(peer)
+
   if (!key) {
     key = nip44.v2.utils.getConversationKey(sk, peer)
     secretsCache.set(peer, key)
   }
+
   return key
 }
+
 const width = 440
 const height = 420
-const sideEffectTypes = new Set(['tipBCH']) // Types with side effects (e.g., broadcast tx)
+
+const sideEffectTypes = new Set(['tipBCH'])  // Types with side effects (e.g., broadcast tx)
+
 browser.runtime.onInstalled.addListener((_, __, reason) => {
   if (reason === 'install') browser.runtime.openOptionsPage()
 })
+
 browser.runtime.onMessage.addListener(async (message, sender) => {
   console.log('Received message in background:', message)
   if (message.openSignUp) {
@@ -60,17 +72,20 @@ browser.runtime.onMessage.addListener(async (message, sender) => {
     }
   }
 })
+
 browser.runtime.onMessageExternal.addListener(
   async ({type, params}, sender) => {
     let extensionId = new URL(sender.url).host
     return handleContentScriptMessage({type, params, host: extensionId})
   }
 )
+
 browser.windows.onRemoved.addListener(_ => {
   if (openPrompt) {
     handlePromptMessage({accept: false}, null)
   }
 })
+
 async function handleContentScriptMessage({type, params, host}) {
   console.log('Handling content script message:', {type, params, host})
   if (NO_PERMISSIONS_REQUIRED[type]) {
@@ -80,6 +95,7 @@ async function handleContentScriptMessage({type, params, host}) {
           'protocol_handler'
         ])
         if (!ph) return false
+
         let {url} = params
         let raw = url.split('nostr:')[1]
         let {type, data} = nip19.decode(raw)
@@ -104,19 +120,24 @@ async function handleContentScriptMessage({type, params, host}) {
         Object.entries(replacements).forEach(([pattern, value]) => {
           result = result.replace(new RegExp(`{ *${pattern} *}`, 'g'), value)
         })
+
         return result
       }
     }
+
     return
   } else {
     releasePromptMutex = await promptMutex.acquire()
+
     console.log('Performing operation:', type)
+
     let finalResult
     let allowed = await getPermissionStatus(
       host,
       type,
       type === 'signEvent' ? params.event : undefined
     )
+
     if (allowed === true) {
       finalResult = await performOperation(type, params)
       releasePromptMutex()
@@ -137,11 +158,13 @@ async function handleContentScriptMessage({type, params, host}) {
           params: JSON.stringify(params),
           type
         })
+
         if (sideEffectTypes.has(type)) {
           // For side-effect ops, prompt FIRST, then perform if accepted
           const {top, left} = await getPosition(width, height)
           let accept = await new Promise((resolve, reject) => {
             openPrompt = {resolve, reject}
+
             browser.windows.create({
               url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
               type: 'popup',
@@ -151,10 +174,12 @@ async function handleContentScriptMessage({type, params, host}) {
               left: left
             })
           })
+
           if (!accept) {
             releasePromptMutex()
             return {error: {message: 'denied'}}
           }
+
           // Now perform after accept
           finalResult = await performOperation(type, params)
         } else {
@@ -163,9 +188,11 @@ async function handleContentScriptMessage({type, params, host}) {
           if (typeof finalResult === 'string') {
             qs.set('result', finalResult)
           }
+
           const {top, left} = await getPosition(width, height)
           let accept = await new Promise((resolve, reject) => {
             openPrompt = {resolve, reject}
+
             browser.windows.create({
               url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
               type: 'popup',
@@ -175,6 +202,7 @@ async function handleContentScriptMessage({type, params, host}) {
               left: left
             })
           })
+
           if (!accept) {
             releasePromptMutex()
             return {error: {message: 'denied'}}
@@ -187,15 +215,17 @@ async function handleContentScriptMessage({type, params, host}) {
         }
       }
     }
-    console.log('Operation result:', finalResult);  // Added log for response debugging
+
     return finalResult
   }
 }
+
 async function performOperation(type, params) {
   let results = await browser.storage.local.get('private_key')
   if (!results || !results.private_key) {
     return {error: {message: 'no private key found'}}
   }
+
   let sk = results.private_key
   try {
     switch (type) {
@@ -219,17 +249,19 @@ async function performOperation(type, params) {
       case 'nip44.encrypt': {
         const {peer, plaintext} = params
         const key = getSharedSecret(sk, peer)
+
         return nip44.v2.encrypt(plaintext, key)
       }
       case 'nip44.decrypt': {
         const {peer, ciphertext} = params
         const key = getSharedSecret(sk, peer)
+
         return nip44.v2.decrypt(ciphertext, key)
       }
       case 'tipBCH': {
         const { recipientNpub, amountSat } = params
         console.log('Performing tipBCH to', recipientNpub, 'amount', amountSat)
-        const nsec = nip19.nsecEncode(hexToBytes(sk))
+        const nsec = nip19.nsecEncode(secp.utils.hexToBytes(sk))
         const senderNpub = nip19.npubEncode(getPublicKey(sk))
         return await sendTip(senderNpub, nsec, recipientNpub, amountSat)
       }
@@ -239,19 +271,26 @@ async function performOperation(type, params) {
     return {error: {message: error.message, stack: error.stack}}
   }
 }
+
 async function handlePromptMessage({host, type, accept, conditions}, sender) {
   openPrompt?.resolve?.(accept)
+
   if (conditions) {
     await updatePermission(host, type, accept, conditions)
   }
+
   openPrompt = null
+
   releasePromptMutex()
+
   if (sender) {
     browser.windows.remove(sender.tab.windowId)
   }
 }
+
 async function openSignUpWindow() {
   const {top, left} = await getPosition(width, height)
+
   browser.windows.create({
     url: `${browser.runtime.getURL('signup.html')}`,
     type: 'popup',
@@ -261,10 +300,12 @@ async function openSignUpWindow() {
     left: left
   })
 }
+
 // --- BCH Helpers ---
 function _hash160 (x) {
   return ripemd160(sha256(x))
 }
+
 function _encodeDer (r, s) {
   function encodeInt (val) {
     let bytes = []
@@ -283,7 +324,8 @@ function _encodeDer (r, s) {
   const totalLen = rEnc.length + sEnc.length
   return new Uint8Array([0x30, totalLen, ...rEnc, ...sEnc])
 }
-async function _buildP2PKHOutput (address) { // Made async for await import
+
+async function _buildP2PKHOutput (address) {  // Made async for await import
   const { cashAddressToLockingBytecode } = await import('@bitauth/libauth')
   const result = cashAddressToLockingBytecode(address)
   if (typeof result === 'string') {
@@ -291,91 +333,100 @@ async function _buildP2PKHOutput (address) { // Made async for await import
   }
   return result.bytecode
 }
-async function getFeeRate() {
-  // Cache fee rate (5min expiry)
-  let {lastFeeRate, lastFeeRateTime} = await browser.storage.local.get(['lastFeeRate', 'lastFeeRateTime'])
-  if (lastFeeRate && Date.now() - lastFeeRateTime < 300000) {
-    return lastFeeRate
-  }
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), 10000) // 10s timeout
-  try {
-    const res = await fetch(`${BLOCKCHAIR_API}stats`, { signal: controller.signal })
-    clearTimeout(timeoutId)
-    if (!res.ok) throw new Error('Fee fetch failed')
-    const data = await res.json()
-    const feeRate = data.suggested_transaction_fee_per_byte_sat || 1
-    await browser.storage.local.set({lastFeeRate: feeRate, lastFeeRateTime: Date.now()})
-    return feeRate
-  } catch (err) {
-    clearTimeout(timeoutId)
-    console.error('getFeeRate error:', err)
-    return 1 // Fallback
-  }
-}
+
 async function selectUtxos(utxos, targetAmount, feeRate) {
-  // Greedy selection: Sort descending, pick until covered
-  utxos.sort((a, b) => b.value - a.value)
+  utxos = utxos.filter(utxo => utxo.value >= 546)  // Skip dust
+  utxos.sort((a, b) => b.value - a.value)  // Descending
   let selected = []
   let total = 0n
   for (let utxo of utxos) {
-    if (utxo.value < 546) continue // Skip dust
     selected.push(utxo)
     total += BigInt(utxo.value)
-    let estInputs = selected.length
-    let estOutputs = total - targetAmount > 546n ? 2 : 1 // + change?
-    let estSize = 10 + estInputs * 148 + estOutputs * 34
-    let estFee = BigInt(estSize) * BigInt(feeRate)
-    if (total >= targetAmount + estFee) return {selected, total}
+    const estInputs = selected.length
+    const estOutputs = (total - targetAmount > 546n) ? 2 : 1
+    const estSize = 10 + estInputs * 148 + estOutputs * 34
+    const estFee = BigInt(estSize) * feeRate
+    if (total >= targetAmount + estFee) {
+      console.log('Selected UTXOs:', selected.length, 'Total:', total.toString())
+      return {selected, total}
+    }
   }
-  throw new Error('Insufficient funds')
+  throw new Error('Insufficient funds after UTXO selection')
 }
+
 async function sendTip (senderNpub, nsec, recipientNpub, amountSat) {
   console.log('sendTip started:', {senderNpub, recipientNpub, amountSat})
   const { type, data: privBytes } = nip19.decode(nsec)
   if (type !== 'nsec') {
+    console.error('Invalid nsec type')
     return { success: false, error: 'Invalid nsec' }
   }
+
   try {
-    const { encode } = await import('cashaddrjs') // Dynamic import to defer loading
     const compressedPub = secp.getPublicKey(privBytes, true)
     const senderPkh = _hash160(compressedPub)
     const senderAddress = encode('bitcoincash', 'P2PKH', senderPkh)
-    // Derive recipient (fixed to use Point for correct parity)
+
+    // Derive recipient with validation
     let recipientHex
     try {
-      recipientHex = nip19.decode(recipientNpub).data
-    } catch {
+      const decoded = nip19.decode(recipientNpub)
+      if (decoded.type !== 'npub') throw new Error('Invalid recipient type')
+      recipientHex = decoded.data
+    } catch (err) {
+      console.error('Invalid recipient npub:', err)
       return { success: false, error: 'Invalid recipient npub' }
     }
-    const point = secp.Point.fromHex(recipientHex) // Uses x-only, assumes even y as per noble (prepends 02)
-    const recipientCompressedPub = point.toRawBytes(true)
+    let recipientCompressedPub
+    try {
+      recipientCompressedPub = secp.Point.fromHex('02' + recipientHex).toRawBytes(true)  // Even y
+    } catch {
+      try {
+        recipientCompressedPub = secp.Point.fromHex('03' + recipientHex).toRawBytes(true)  // Odd y
+      } catch (err) {
+        console.error('Invalid recipient pubkey:', err)
+        return { success: false, error: 'Invalid recipient pubkey derivation' }
+      }
+    }
     const recipientPkh = _hash160(recipientCompressedPub)
     const recipientAddress = encode('bitcoincash', 'P2PKH', recipientPkh)
-    // Pre-balance check
-    const balance = await getBCHBalance(senderAddress)
-    const feeRate = await getFeeRate()
-    const estFee = BigInt(200) * BigInt(feeRate) // Rough est for 1in/1-2out
-    if (balance < amountSat + Number(estFee)) {
-      console.log('Balance check failed:', balance); // Added log
-      return { success: false, error: `Insufficient balance: ${balance} sat available` }
+
+    // Pre-balance check with dynamic fee
+    const balance = BigInt(await getBCHBalance(senderAddress))  // sat
+    console.log('Sender balance:', balance.toString(), 'sat')
+    const feeRate = BigInt(await getFeeRate())  // sat/byte
+    console.log('Current fee rate:', feeRate.toString(), 'sat/byte')
+    const dustLimit = 546n
+    if (balance === 0n) {
+      return { success: false, error: 'No balance available' }
     }
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 10000) // 10s timeout
-    const utxoRes = await fetch(`${API_BASE}utxos/${senderAddress}`, { signal: controller.signal })
-    clearTimeout(timeoutId)
-    if (!utxoRes.ok) {
-      return { success: false, error: 'Failed to fetch UTXOs' }
+    if (balance < dustLimit) {
+      return { success: false, error: 'Dust balance only - cannot tip' }
     }
-    const utxoData = await utxoRes.json()
-    if (!utxoData.success || !utxoData.utxos.length) {
+
+    // Fetch UTXOs early for accurate est
+    const utxos = await getUtxos(senderAddress)
+    if (!utxos.length) {
+      console.error('No UTXOs found')
       return { success: false, error: 'No UTXOs found' }
     }
-    const { instantiateSha256 } = await import('@bitauth/libauth')
+
+    // Est fee based on potential inputs/outputs (conservative: assume 2 inputs, 2 outputs)
+    const estInputs = Math.min(utxos.length, 2)
+    const estOutputs = 2  // Tip + change
+    const estSize = 10 + estInputs * 148 + estOutputs * 34
+    const estFee = BigInt(estSize) * feeRate
+    const minRequired = BigInt(amountSat) + estFee + dustLimit  // Extra buffer for change/dust
+    if (balance < minRequired) {
+      console.error('Insufficient balance:', balance.toString(), ' < ', minRequired.toString())
+      return { success: false, error: `Insufficient balance: ${balance} sat available. Need at least ${minRequired} sat for tip + fee.` }
+    }
+
     const sha256Instance = await instantiateSha256()
     const sha256Hash = sha256Instance.hash
+
     return new Promise((resolve) => {
-      sendTransaction(senderAddress, recipientAddress, BigInt(amountSat), utxoData.utxos, sha256Hash, privBytes, feeRate, (err, txId) => {
+      sendTransaction(senderAddress, recipientAddress, BigInt(amountSat), utxos, sha256Hash, privBytes, feeRate, (err, txId) => {
         if (err) {
           console.error('sendTransaction error:', err)
           resolve({ success: false, error: err.message })
@@ -386,20 +437,22 @@ async function sendTip (senderNpub, nsec, recipientNpub, amountSat) {
       })
     })
   } catch (err) {
-    console.error('sendTip error:', err); // Added log for catch
+    console.error('sendTip error:', err)
     return { success: false, error: err.message }
   }
 }
+
 function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha256, privBytes, feeRate, callback) {
   console.log('sendTransaction started')
   import('@bitauth/libauth').then(async (libauth) => {
     try {
       const {selected: inputs, total: totalInput} = await selectUtxos(utxos, amountSat, feeRate)
       const inputCount = inputs.length
-      const estSize = 10 + inputCount * 148 + 68 // 2 outputs max (tip + change)
+      const estSize = 10 + inputCount * 148 + 68  // 2 outputs max (tip + change)
       let fee = BigInt(estSize) * BigInt(feeRate)
       let change = totalInput - amountSat - fee
       if (change < 0n) throw new Error('Insufficient funds after fee calc')
+
       const transaction = {
         version: 2,
         inputs: inputs.map(utxo => ({
@@ -414,6 +467,7 @@ function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha
         }],
         locktime: 0
       }
+
       if (change >= 546n) {
         transaction.outputs.push({
           valueSatoshis: change,
@@ -421,12 +475,13 @@ function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha
         })
       } else {
         // Recalc fee without change output
-        fee += 34n * BigInt(feeRate) // Extra for omitted output
+        fee += 34n * BigInt(feeRate)  // Extra for omitted output
         change = totalInput - amountSat - fee
         if (change < 0n) throw new Error('Insufficient funds')
       }
+
       transaction.inputs.forEach((input, i) => {
-        const coveredBytecode = libauth.hexToBin(utxos[i].scriptPubKey)
+        const coveredBytecode = libauth.hexToBin(utxos[i].scriptPubKey || toScriptPubKey(senderAddress))  // Fallback if no scriptPubKey
         const transactionOutpointsHash = sha256(sha256(libauth.encodeTransactionOutpoints(transaction.inputs)))
         const transactionSequenceNumbersHash = sha256(sha256(libauth.encodeTransactionInputSequenceNumbersForSigning(transaction.inputs)))
         const transactionOutputsHash = sha256(sha256(libauth.encodeTransactionOutputs(transaction.outputs)))
@@ -451,22 +506,11 @@ function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha
         const pubkey = secp.getPublicKey(privBytes, true)
         input.unlockingBytecode = new Uint8Array([sigWithType.length, ...sigWithType, pubkey.length, ...pubkey])
       })
+
       const rawTx = libauth.binToHex(libauth.encodeTransaction(transaction))
-      fetch(`${API_BASE}broadcast`, {
-        method: 'POST',
-        body: JSON.stringify({ rawtx: rawTx }),
-        headers: { 'Content-Type': 'application/json' }
-      })
-        .then(broadcastRes => {
-          if (!broadcastRes.ok) throw new Error(`Broadcast error: ${broadcastRes.statusText}`)
-          return broadcastRes.json()
-        })
-        .then(data => {
-          callback(null, data.txid)
-        })
-        .catch(e => {
-          callback(e)
-        })
+
+      const txId = await broadcastTx(rawTx)
+      callback(null, txId)
     } catch (err) {
       callback(err)
     }
@@ -474,4 +518,10 @@ function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha
     callback(new Error('Failed to load transaction library: ' + importErr.message))
   })
 }
-console.log('Background script loaded successfully'); // Debug log for successful parse/load
+
+function toScriptPubKey(address) {
+  const { hash } = decode(address);
+  return hexToBytes('76a914' + bytesToHex(hash) + '88ac');
+}
+
+console.log('Background script loaded successfully');  // Debug log for successful parse/load

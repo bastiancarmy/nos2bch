@@ -4,7 +4,35 @@ import * as secp from '@noble/secp256k1'
 import { sha256 } from '@noble/hashes/sha256'
 import { ripemd160 } from '@noble/hashes/ripemd160'
 import { hexToBytes } from '@noble/hashes/utils'
-import { encode } from 'cashaddrjs'
+import { encode, decode } from 'cashaddrjs'
+import { ElectrumClient } from '@electrum-cash/network'  // Updated import per README
+
+const ELECTRUM_SERVERS = [
+  { host: 'electrum.imaginary.cash', port: 50002, protocol: 'ssl' },
+  { host: 'cashnode.bch.ninja', port: 50002, protocol: 'ssl' },
+  { host: 'fulcrum.criptolayer.net', port: 50002, protocol: 'ssl' }  // Fallbacks with high uptime
+];
+
+let electrumClient = null;
+
+async function connectElectrum(retries = 3) {
+  if (!electrumClient) {
+    for (let attempt = 0; attempt < retries; attempt++) {
+      for (const server of ELECTRUM_SERVERS) {
+        try {
+          electrumClient = new ElectrumClient('nos2bch', '1.4.1', server.host, server.port, server.protocol);
+          await electrumClient.connect();
+          return electrumClient;
+        } catch (err) {
+          console.error(`Failed to connect to ${server.host} (attempt ${attempt + 1}):`, err);
+        }
+      }
+      await new Promise(resolve => setTimeout(resolve, 2000));  // Backoff retry
+    }
+    throw new Error('No Electrum servers available after retries');
+  }
+  return electrumClient;
+}
 
 export const NO_PERMISSIONS_REQUIRED = {
   replaceURL: true
@@ -144,12 +172,6 @@ export async function getPosition(width, height) {
 
 // --- Added BCH Functions ---
 
-export const BLOCKCHAIR_API = 'https://api.blockchair.com/bitcoin-cash/'
-
-function hash160(pubBytes) {
-  return ripemd160(sha256(pubBytes))
-}
-
 export function deriveBCHAddress(pubkeyHex) {
   const xBytes = hexToBytes(pubkeyHex)
   let compressedHex
@@ -165,37 +187,86 @@ export function deriveBCHAddress(pubkeyHex) {
     compressedHex = tempCompressed
   }
   const pubBytes = hexToBytes(compressedHex)
-  const pkh = hash160(pubBytes)
+  const pkh = ripemd160(sha256(pubBytes))
   return encode('bitcoincash', 'P2PKH', pkh)
 }
 
 export async function getBCHBalance(address) {
+  const client = await connectElectrum();
   try {
-    const res = await fetch(`${BLOCKCHAIR_API}dashboards/address/${address}`)
-    if (!res.ok) throw new Error(`HTTP error: ${res.status}`)
-    const { data } = await res.json()
-    // Balance in satoshis; convert to BCH
-    return (data[address]?.address?.balance || 0) / 100000000
-  } catch (error) {
-    console.error('Failed to fetch BCH balance:', error)
-    return 0
+    const balance = await client.request('blockchain.scripthash.get_balance', addressToScripthash(address));
+    return (balance.confirmed + balance.unconfirmed) / 100000000;  // Sat to BCH
+  } catch (err) {
+    console.error('Electrum balance fetch failed:', err);
+    return 0;
   }
 }
 
 export async function getTxHistory(address) {
+  const client = await connectElectrum();
   try {
-    const res = await fetch(`${BLOCKCHAIR_API}dashboards/address/${address}?transaction_details=true`)
-    if (!res.ok) throw new Error(`HTTP error: ${res.status}`)
-    const { data } = await res.json()
-    return (data[address]?.transactions || []).map(tx => ({
-      hash: tx.hash,
-      time: tx.time,
-      // to BCH
-      balance_change: tx.balance_change / 100000000,
-      confirmed: tx.block_id > 0
-    }))
-  } catch (error) {
-    console.error('Failed to fetch tx history:', error)
-    return []
+    const history = await client.request('blockchain.scripthash.get_history', addressToScripthash(address));
+    return history.map(tx => ({
+      hash: tx.tx_hash,
+      time: tx.timestamp,
+      balance_change: tx.value / 100000000,  // Sat to BCH
+      confirmed: tx.height > 0
+    }));
+  } catch (err) {
+    console.error('Electrum history fetch failed:', err);
+    return [];
   }
+}
+
+export async function getFeeRate() {
+  // Cache fee rate (5min expiry)
+  let {lastFeeRate, lastFeeRateTime} = await browser.storage.local.get(['lastFeeRate', 'lastFeeRateTime'])
+  if (lastFeeRate && Date.now() - lastFeeRateTime < 300000) {
+    return lastFeeRate
+  }
+  const client = await connectElectrum();
+  try {
+    const fee = await client.request('blockchain.estimatefee', 2);  // Estimate for 2 blocks (fast)
+    const feeRate = Math.max(1, Math.round(fee * 100000000));  // BCH to sat/byte
+    await browser.storage.local.set({lastFeeRate: feeRate, lastFeeRateTime: Date.now()})
+    return feeRate
+  } catch (err) {
+    console.error('Electrum fee fetch failed:', err);
+    return 1;  // Fallback
+  }
+}
+
+export async function getUtxos(address) {
+  const client = await connectElectrum();
+  try {
+    const utxos = await client.request('blockchain.scripthash.listunspent', addressToScripthash(address));
+    return utxos.map(utxo => ({
+      txid: utxo.tx_hash,
+      vout: utxo.tx_pos,
+      value: utxo.value,
+      scriptPubKey: utxo.script_pubkey  // If needed for signing
+    }));
+  } catch (err) {
+    console.error('Electrum UTXO fetch failed:', err);
+    return [];
+  }
+}
+
+export async function broadcastTx(rawTx) {
+  const client = await connectElectrum();
+  try {
+    const txid = await client.request('blockchain.transaction.broadcast', rawTx);
+    return txid;
+  } catch (err) {
+    console.error('Electrum broadcast failed:', err);
+    throw err;
+  }
+}
+
+function addressToScripthash(address) {
+  const { prefix, type, hash } = decode(address);
+  const script = new Uint8Array([0x76, 0xa9, hash.byteLength, ...hash, 0x88, 0xac]);
+  const hashed = sha256(script);
+  // Reverse the hash for scripthash
+  return Array.from(hashed.reverse()).map(b => b.toString(16).padStart(2, '0')).join('');
 }
