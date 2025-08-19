@@ -361,6 +361,10 @@ async function sendTip (senderNpub, nsec, recipientNpub, amountSat, notify) {  /
     return { success: false, error: 'Invalid nsec' }
   }
 
+  if (amountSat < 1000) {
+    return { success: false, error: 'Minimum tip 1000 sats' }
+  }
+
   try {
     const compressedPub = secp.getPublicKey(privBytes, true)
     const senderPkh = _hash160(compressedPub)
@@ -393,7 +397,8 @@ async function sendTip (senderNpub, nsec, recipientNpub, amountSat, notify) {  /
     // Pre-balance check with dynamic fee
     const balance = BigInt(await getBCHBalance(senderAddress))  // sat
     console.log('Sender balance:', balance.toString(), 'sat')
-    const feeRate = BigInt(await getFeeRate())  // sat/byte
+    let feeRateNum = await getFeeRate()  // number
+    const feeRate = BigInt(Math.max(feeRateNum, 1))  // Ensure at least 1 sat/byte
     console.log('Current fee rate:', feeRate.toString(), 'sat/byte')
     const dustLimit = 546n
     if (balance === 0n) {
@@ -565,4 +570,4 @@ function toScriptPubKey(address) {
   return hexToBytes('76a914' + bytesToHex(dummyPkh) + '88ac');
 }
 
-console.log('Background script loaded successfully');  // Debug log for successful parse/load
+console.log('Background script loaded successfully');

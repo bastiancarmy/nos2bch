@@ -1,5 +1,3 @@
-// extension/options.jsx - Updated QR code rendering to match popup method: Removed wrapping div; applied size=256 directly with margin style on QRCodeSVG for spacing/consistency. Kept level="H" for better error correction on long keys (optional but recommended; can remove if strict match needed). Consolidated handling—no multiple imports, same as popup (QRCodeSVG from qrcode.react). Preserved all other functionality.
-
 import {bytesToHex, hexToBytes} from '@noble/hashes/utils'
 import {getPublicKey} from 'nostr-tools'
 import * as nip19 from 'nostr-tools/nip19'
@@ -7,7 +5,7 @@ import {decrypt, encrypt} from 'nostr-tools/nip49'
 import {generateSecretKey} from 'nostr-tools/pure'
 import React, {useEffect, useState} from 'react'
 import {createRoot} from 'react-dom/client'
-import { QRCodeSVG } from 'qrcode.react' // Switched to qrcode.react with named import for ESM/React 19 compat; install if needed: yarn add qrcode.react
+import { QRCodeSVG } from 'qrcode.react'
 import browser from 'webextension-polyfill'
 import {removePermissions, deriveBCHAddress, getBCHBalance, getTxHistory} from './common'
 
@@ -37,8 +35,8 @@ function Options() {
   let [bchAddress, setBchAddress] = useState(null)
   let [bchBalance, setBchBalance] = useState(null)
   let [txHistory, setTxHistory] = useState([])
-  let [loading, setLoading] = useState(true) // For initial load
-  let [balanceLoading, setBalanceLoading] = useState(false) // Separate for balance retry
+  let [loading, setLoading] = useState(true)
+  let [balanceLoading, setBalanceLoading] = useState(false)
   const showMessage = msg => {
     setMessages(oldMessages => [...oldMessages, msg])
   }
@@ -66,15 +64,7 @@ function Options() {
           if (results.lastBchBalanceTime && Date.now() - results.lastBchBalanceTime < 600000) { // 10 min cache
             setBchBalance(results.lastBchBalance)
           } else {
-            setBalanceLoading(true)
-            getBCHBalance(address).then(balance => {
-              setBchBalance(balance)
-              browser.storage.local.set({lastBchBalance: balance, lastBchBalanceTime: Date.now()})
-              setBalanceLoading(false)
-            }).catch(err => {
-              setBchBalance('Error: ' + err.message)
-              setBalanceLoading(false)
-            })
+            refreshBalance()
           }
           getTxHistory(address).then(history => setTxHistory(history)).catch(() => setTxHistory([]))
         } else {
@@ -115,9 +105,28 @@ function Options() {
     })
     setPermissions(list)
   }
+  async function refreshBalance() {
+    if (!bchAddress) return
+    setBalanceLoading(true)
+    try {
+      const balance = await getBCHBalance(bchAddress)
+      const sats = Math.floor(balance * 100000000)
+      setBchBalance(sats)
+      browser.storage.local.set({lastBchBalance: sats, lastBchBalanceTime: Date.now()})
+    } catch (err) {
+      setBchBalance(0)
+      showMessage('Error loading balance: ' + err.message)
+    } finally {
+      setBalanceLoading(false)
+    }
+  }
   if (loading) {
     return <div>Loading options...</div>; // Spinner/message during load
   }
+
+  const formattedBalance = bchBalance !== null ? bchBalance.toLocaleString() + ' sats' : (balanceLoading ? 'Loading...' : 'Error loading balance');  // Add comma separators
+  const formattedBCH = bchBalance !== null ? (bchBalance / 100000000).toFixed(8) + ' BCH' : '';  // Show BCH with full decimals if desired
+
   return (
     <>
       <h1 style={{fontSize: '25px', marginBlockEnd: '0px'}}>nos2bch</h1> {/* Fixed to nos2bch */}
@@ -187,7 +196,8 @@ function Options() {
             {bchAddress && (
               <div>
                 <div>BCH Address (from npub): {bchAddress}</div>
-                <div>BCH Balance: {bchBalance !== null ? bchBalance + ' sat' : (balanceLoading ? 'Loading...' : 'Error loading balance')}</div> {/* Separate loading state */}
+                <div>BCH Balance: {formattedBalance} {formattedBCH ? `(${formattedBCH})` : ''}</div> {/* Separate loading state */}
+                <button onClick={refreshBalance} disabled={balanceLoading}>Refresh Balance</button>
               </div>
             )}
             {/* Added Tx History section */}

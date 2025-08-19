@@ -1,12 +1,10 @@
-// extension/popup.jsx - New file: Tip UI with npub/QR/address/balance display (similar to options); tip form (recipient npub, amount sat); button with loading spinner; status display (success txid link, error messages); disable button on zero/low balance; error boundary. Uses qrcode.react for QR.
-
 import {bytesToHex, getPublicKey} from 'nostr-tools/pure'
 import * as nip19 from 'nostr-tools/nip19'
 import React, {useEffect, useState} from 'react'
 import {createRoot} from 'react-dom/client'
 import { QRCodeSVG } from 'qrcode.react'
 import browser from 'webextension-polyfill'
-import {deriveBCHAddress, getBCHBalance} from './common'  // Assume common.js exports these
+import {deriveBCHAddress, getBCHBalance} from './common'
 
 class ErrorBoundary extends React.Component {
   state = { hasError: false };
@@ -23,7 +21,7 @@ function Popup() {
   const [bchBalance, setBchBalance] = useState(null)
   const [recipientNpub, setRecipientNpub] = useState('')
   const [amountSat, setAmountSat] = useState('')
-  const [notify, setNotify] = useState(true)  // New state for notify, default true
+  const [notify, setNotify] = useState(true)
   const [loading, setLoading] = useState(true)
   const [tipLoading, setTipLoading] = useState(false)
   const [tipStatus, setTipStatus] = useState(null)
@@ -39,7 +37,7 @@ function Popup() {
         const address = deriveBCHAddress(pubHex)
         setBchAddress(address)
         getBCHBalance(address).then(balance => {
-          setBchBalance(balance)  // sat
+          setBchBalance(Math.floor(balance * 100000000))  // Convert BCH to sats
         }).catch(err => {
           setBchBalance(0)
           console.error('Balance error:', err)
@@ -50,8 +48,8 @@ function Popup() {
   }, [])
 
   const handleTip = async () => {
-    if (!recipientNpub || !amountSat || Number(amountSat) <= 0) {
-      setTipError('Invalid recipient or amount')
+    if (!recipientNpub || !amountSat || Number(amountSat) < 1000) {
+      setTipError('Invalid recipient or amount (minimum 1000 sats)')
       return
     }
     if (bchBalance < Number(amountSat) + 200) {  // Rough est fee buffer
@@ -74,8 +72,8 @@ function Popup() {
         setAmountSat('')
         // Refresh balance after success
         const newBalance = await getBCHBalance(bchAddress)
-        setBchBalance(newBalance)
-        browser.storage.local.set({lastBchBalance: newBalance, lastBchBalanceTime: Date.now()})
+        setBchBalance(Math.floor(newBalance * 100000000))
+        browser.storage.local.set({lastBchBalance: Math.floor(newBalance * 100000000), lastBchBalanceTime: Date.now()})
       }
     } catch (err) {
       setTipError(err.message || 'Tip error')
@@ -88,6 +86,9 @@ function Popup() {
 
   const canTip = bchBalance >= 546 && !!privKey
 
+  const formattedBalance = bchBalance !== null ? bchBalance.toLocaleString() + ' sats' : 'Loading...';  // Add comma separators
+  const formattedBCH = bchBalance !== null ? (bchBalance / 100000000).toFixed(8) + ' BCH' : '';  // Show BCH with full decimals if desired
+
   return (
     <div style={{padding: '10px', width: '300px'}}>
       <h1>nos2bch</h1>
@@ -98,7 +99,7 @@ function Popup() {
         </>
       )}
       {bchAddress && <div>BCH Address: {bchAddress}</div>}
-      <div>Balance: {bchBalance !== null ? bchBalance + ' sat' : 'Loading...'}</div>
+      <div>Balance: {formattedBalance} {formattedBCH ? `(${formattedBCH})` : ''}</div>
       {bchBalance === 0 && <div style={{color: 'red'}}>Zero balance - fund your address to tip</div>}
       {bchBalance > 0 && bchBalance < 546 && <div style={{color: 'orange'}}>Dust balance - add more funds to tip</div>}
       <h2>Tip BCH</h2>
@@ -114,6 +115,8 @@ function Popup() {
         placeholder="Amount in sat"
         value={amountSat}
         onChange={e => setAmountSat(e.target.value)}
+        min="1000"
+        step="1"
         style={{width: '100%', marginBottom: '5px'}}
       />
       <label style={{display: 'flex', alignItems: 'center', marginBottom: '5px'}}>
