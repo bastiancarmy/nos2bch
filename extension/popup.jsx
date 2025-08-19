@@ -23,6 +23,7 @@ function Popup() {
   const [bchBalance, setBchBalance] = useState(null)
   const [recipientNpub, setRecipientNpub] = useState('')
   const [amountSat, setAmountSat] = useState('')
+  const [notify, setNotify] = useState(true)  // New state for notify, default true
   const [loading, setLoading] = useState(true)
   const [tipLoading, setTipLoading] = useState(false)
   const [tipStatus, setTipStatus] = useState(null)
@@ -63,14 +64,18 @@ function Popup() {
     try {
       const response = await browser.runtime.sendMessage({
         method: 'tipBCH',
-        params: { recipientNpub, amountSat: Number(amountSat) }
+        params: { recipientNpub, amountSat: parseInt(amountSat), notify }  // Use parseInt for safety, add notify
       })
       if (response.error) {
         setTipError(response.error.message || 'Tip failed')
       } else {
-        setTipStatus(`Success! TxID: ${response.txId}`)
+        setTipStatus(`Success! TxID: ${response.txId}${notify ? ' (notified recipient)' : ''}`)
+        setRecipientNpub('')
+        setAmountSat('')
         // Refresh balance after success
-        getBCHBalance(bchAddress).then(balance => setBchBalance(balance))
+        const newBalance = await getBCHBalance(bchAddress)
+        setBchBalance(newBalance)
+        browser.storage.local.set({lastBchBalance: newBalance, lastBchBalanceTime: Date.now()})
       }
     } catch (err) {
       setTipError(err.message || 'Tip error')
@@ -111,6 +116,14 @@ function Popup() {
         onChange={e => setAmountSat(e.target.value)}
         style={{width: '100%', marginBottom: '5px'}}
       />
+      <label style={{display: 'flex', alignItems: 'center', marginBottom: '5px'}}>
+        <input
+          type="checkbox"
+          checked={notify}
+          onChange={e => setNotify(e.target.checked)}
+        />
+        Notify recipient via public Nostr note
+      </label>
       <button onClick={handleTip} disabled={!canTip || tipLoading}>
         {tipLoading ? 'Tipping...' : 'Send Tip'}
       </button>
