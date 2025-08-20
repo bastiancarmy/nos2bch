@@ -4,13 +4,13 @@ import * as secp from '@noble/secp256k1'
 import { sha256 } from '@noble/hashes/sha256'
 import { ripemd160 } from '@noble/hashes/ripemd160'
 import { hexToBytes } from '@noble/hashes/utils'
-import { encode, decode } from 'cashaddrjs'
-import { ElectrumClient } from '@electrum-cash/network'  // Updated import per README
+import { encode as cashEncode, decode as cashDecode } from 'cashaddrjs' // Keep if needed elsewhere, but not for derive
+import { ElectrumClient } from '@electrum-cash/network'
 
 const ELECTRUM_SERVERS = [
   { host: 'electrum.imaginary.cash', port: 50002, protocol: 'ssl' },
   { host: 'cashnode.bch.ninja', port: 50002, protocol: 'ssl' },
-  { host: 'fulcrum.criptolayer.net', port: 50002, protocol: 'ssl' }  // Fallbacks with high uptime
+  { host: 'fulcrum.criptolayer.net', port: 50002, protocol: 'ssl' }
 ];
 
 let electrumClient = null;
@@ -172,23 +172,21 @@ export async function getPosition(width, height) {
 
 // --- Added BCH Functions ---
 
-export function deriveBCHAddress(pubkeyHex) {
-  const xBytes = hexToBytes(pubkeyHex)
-  let compressedHex
+export function deriveBCHAddress(pubHex) {
+  let compressedPub
   try {
-    // Try even y (prefix 02)
-    const tempCompressed = '02' + pubkeyHex
-    secp.Point.fromHex(tempCompressed) // Validates
-    compressedHex = tempCompressed
+    const temp = hexToBytes('02' + pubHex);
+    secp.Point.fromHex(temp); // Validate
+    compressedPub = temp;
   } catch {
-    // Odd y (prefix 03)
-    const tempCompressed = '03' + pubkeyHex
-    secp.Point.fromHex(tempCompressed)
-    compressedHex = tempCompressed
+    const temp = hexToBytes('03' + pubHex);
+    secp.Point.fromHex(temp);
+    compressedPub = temp;
   }
-  const pubBytes = hexToBytes(compressedHex)
-  const pkh = ripemd160(sha256(pubBytes))
-  return encode('bitcoincash', 'P2PKH', pkh)
+  const pkh = ripemd160(sha256(compressedPub));
+  const prefix = 'bitcoincash';
+  const type = 'P2PKH';
+  return cashEncode(prefix, type, pkh);
 }
 
 export async function getBCHBalance(address) {
@@ -264,7 +262,7 @@ export async function broadcastTx(rawTx) {
 }
 
 function addressToScripthash(address) {
-  const { prefix, type, hash } = decode(address);
+  const { prefix, type, hash } = cashDecode(address);
   const script = new Uint8Array([0x76, 0xa9, hash.byteLength, ...hash, 0x88, 0xac]);
   const hashed = sha256(script);
   // Reverse the hash for scripthash

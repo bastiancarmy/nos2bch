@@ -35,8 +35,8 @@ function Options() {
   let [bchAddress, setBchAddress] = useState(null)
   let [bchBalance, setBchBalance] = useState(null)
   let [txHistory, setTxHistory] = useState([])
-  let [loading, setLoading] = useState(true)
-  let [balanceLoading, setBalanceLoading] = useState(false)
+  let [loading, setLoading] = useState(true) // For initial load
+  let [balanceLoading, setBalanceLoading] = useState(false) // Separate for balance retry
   const showMessage = msg => {
     setMessages(oldMessages => [...oldMessages, msg])
   }
@@ -48,41 +48,37 @@ function Options() {
     return () => clearTimeout(timeout)
   }, [messages, setMessages])
   useEffect(() => {
-    browser.storage.local
-      .get(['private_key', 'protocol_handler', 'notifications', 'lastBchBalance', 'lastBchBalanceTime'])
-      .then(results => {
-        console.log('Options storage loaded:', results); // Debug
-        if (results.private_key) {
-          let prvKey = results.private_key
-          let nsec = nip19.nsecEncode(hexToBytes(prvKey))
-          setPrivKeyInput(nsec)
-          setPrivKey(nsec)
-          let pubHex = getPublicKey(prvKey)
-          let address = deriveBCHAddress(pubHex)
-          setBchAddress(address)
-          // Cached balance to avoid API limits
-          if (results.lastBchBalanceTime && Date.now() - results.lastBchBalanceTime < 600000) { // 10 min cache
-            setBchBalance(results.lastBchBalance)
-          } else {
-            refreshBalance()
-          }
-          getTxHistory(address).then(history => setTxHistory(history)).catch(() => setTxHistory([]))
+    (async () => {
+      const results = await browser.storage.local.get(['private_key', 'protocol_handler', 'notifications', 'lastBchBalance', 'lastBchBalanceTime']);
+      console.log('Options storage loaded:', results); // Debug
+      if (results.private_key) {
+        let prvKey = results.private_key
+        let nsec = nip19.nsecEncode(hexToBytes(prvKey))
+        setPrivKeyInput(nsec)
+        setPrivKey(nsec)
+        let pubHex = getPublicKey(prvKey)
+        const address = await deriveBCHAddress(pubHex) // Await
+        setBchAddress(address)
+        // Cached balance to avoid API limits
+        if (results.lastBchBalanceTime && Date.now() - results.lastBchBalanceTime < 600000) { // 10 min cache
+          setBchBalance(results.lastBchBalance)
         } else {
-          browser.runtime.openOptionsPage(); // Auto-open if no key
+          refreshBalance(address)
         }
-        if (results.protocol_handler) {
-          setProtocolHandler(results.protocol_handler)
-          setHandleNostrLinks(true)
-          setShowProtocolHandlerHelp(false)
-        }
-        if (results.notifications) {
-          setNotifications(true)
-        }
-        setLoading(false) // Done loading
-      }).catch(err => {
-        console.error('Storage get error:', err);
-        setLoading(false)
-      })
+        getTxHistory(address).then(history => setTxHistory(history)).catch(() => setTxHistory([]))
+      } else {
+        browser.runtime.openOptionsPage(); // Auto-open if no key
+      }
+      if (results.protocol_handler) {
+        setProtocolHandler(results.protocol_handler)
+        setHandleNostrLinks(true)
+        setShowProtocolHandlerHelp(false)
+      }
+      if (results.notifications) {
+        setNotifications(true)
+      }
+      setLoading(false) // Done loading
+    })();
   }, [])
   useEffect(() => {
     loadPermissions()
@@ -105,11 +101,11 @@ function Options() {
     })
     setPermissions(list)
   }
-  async function refreshBalance() {
-    if (!bchAddress) return
+  async function refreshBalance(address) {
+    if (!address) return
     setBalanceLoading(true)
     try {
-      const balance = await getBCHBalance(bchAddress)
+      const balance = await getBCHBalance(address)
       const sats = Math.floor(balance * 100000000)
       setBchBalance(sats)
       browser.storage.local.set({lastBchBalance: sats, lastBchBalanceTime: Date.now()})
@@ -197,7 +193,7 @@ function Options() {
               <div>
                 <div>BCH Address (from npub): {bchAddress}</div>
                 <div>BCH Balance: {formattedBalance} {formattedBCH ? `(${formattedBCH})` : ''}</div> {/* Separate loading state */}
-                <button onClick={refreshBalance} disabled={balanceLoading}>Refresh Balance</button>
+                <button onClick={() => refreshBalance(bchAddress)} disabled={balanceLoading}>Refresh Balance</button>
               </div>
             )}
             {/* Added Tx History section */}
@@ -455,7 +451,9 @@ function Options() {
       // we will only save a key that is a valid nsec
       if (nip19.decode(key).type === 'nsec') {
         addUnsavedChanges('private_key')
-        setBchAddress(deriveBCHAddress(getPublicKey(bytesToHex(nip19.decode(key).data))))
+        const pubHex = getPublicKey(bytesToHex(nip19.decode(key).data))
+        const address = await deriveBCHAddress(pubHex) // Await
+        setBchAddress(address)
       }
     } catch (err) {
       /***/
@@ -466,35 +464,9 @@ function Options() {
     let nsec = nip19.nsecEncode(skBytes)
     setPrivKeyInput(nsec)
     addUnsavedChanges('private_key')
-    setBchAddress(deriveBCHAddress(getPublicKey(skBytes)))
-  }
-  function encryptPrivateKeyAndDisplay(ev) {
-    ev.preventDefault()
-    try {
-      let {data} = nip19.decode(privKeyInput)
-      let encrypted = encrypt(data, password, 16, 0x00)
-      setPrivKeyInput(encrypted)
-      hidePrivateKey(false)
-      setAskPassword(null)
-    } catch (e) {
-      showMessage(e.message)
-    }
-  }
-  function decryptPrivateKeyAndSave(ev) {
-    ev.preventDefault()
-    try {
-      let decrypted = decrypt(privKeyInput, password)
-      setPrivKeyInput(nip19.nsecEncode(decrypted))
-      browser.storage.local.set({
-        private_key: bytesToHex(decrypted)
-      })
-      setTimeout(() => {
-        setAskPassword(null)
-      }, 2000)
-      setBchAddress(deriveBCHAddress(getPublicKey(bytesToHex(decrypted))))
-    } catch (e) {
-      showMessage(e.message)
-    }
+    const pubHex = getPublicKey(skBytes)
+    const address = await deriveBCHAddress(pubHex) // Await
+    setBchAddress(address)
   }
   async function saveKey() {
     if (!isKeyValid()) {
@@ -594,6 +566,7 @@ function Options() {
     setUnsavedChanges([])
   }
 }
+
 createRoot(document.getElementById('main')).render(
   <ErrorBoundary>
     <Options />

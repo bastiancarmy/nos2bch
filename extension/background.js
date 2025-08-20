@@ -2,12 +2,9 @@ import browser from 'webextension-polyfill'
 import {getPublicKey, finalizeEvent, verifyEvent} from 'nostr-tools/pure'
 import {nip04, nip19} from 'nostr-tools'
 import * as nip44 from 'nostr-tools/nip44'
-import { Mutex } from 'async-mutex'
 import { LRUCache } from './utils'
-import { hexToBytes } from '@noble/hashes/utils'
 import {
   NO_PERMISSIONS_REQUIRED,
-  PERMISSION_NAMES,
   getPermissionStatus,
   updatePermission,
   showNotification,
@@ -28,14 +25,14 @@ console.log('Background script starting to load...');  // Debug log for registra
 secp.etc.hmacSha256Sync = (k, ...m) => hmac(sha256, k, secp.etc.concatBytes(...m))
 
 let openPrompt = null
-let promptMutex = new Mutex()
-let releasePromptMutex = () => {}
+let promptMutex = false
 let secretsCache = new LRUCache(100)
 let previousSk = null
 
 function getSharedSecret(sk, peer) {
   if (previousSk !== sk) {
     secretsCache.clear()
+    previousSk = sk
   }
 
   let key = secretsCache.get(peer)
@@ -59,17 +56,16 @@ browser.runtime.onInstalled.addListener((_, __, reason) => {
 
 browser.runtime.onMessage.addListener(async (message, sender) => {
   console.log('Received message in background:', message)
-  if (message.openSignUp) {
-    openSignUpWindow()
-    browser.windows.remove(sender.tab.windowId)
-  } else {
-    let {prompt} = message
-    if (prompt) {
-      handlePromptMessage(message, sender)
-    } else {
-      return handleContentScriptMessage(message)
-    }
+  if (message.prompt) {
+    await handlePromptMessage(message, sender)
+    return
   }
+  let host = sender.url ? new URL(sender.url).host : ''
+  if (!host && sender.url && sender.url.startsWith(browser.runtime.getURL(''))) {
+    host = 'nos2bch'
+  }
+  console.log('Handling content script message:', message, 'host:', host)
+  return handleContentScriptMessage({type: message.type, params: message.params, host})
 })
 
 browser.runtime.onMessageExternal.addListener(
@@ -85,8 +81,17 @@ browser.windows.onRemoved.addListener(_ => {
   }
 })
 
+function acquirePromptMutex() {
+  if (promptMutex) return false
+  promptMutex = true
+  return true
+}
+
+function releasePromptMutex() {
+  promptMutex = false
+}
+
 async function handleContentScriptMessage({type, params, host}) {
-  console.log('Handling content script message:', {type, params, host})
   if (NO_PERMISSIONS_REQUIRED[type]) {
     switch (type) {
       case 'replaceURL': {
@@ -97,27 +102,27 @@ async function handleContentScriptMessage({type, params, host}) {
 
         let {url} = params
         let raw = url.split('nostr:')[1]
-        let {type, data} = nip19.decode(raw)
+        let {type: hrp, data} = nip19.decode(raw)
         let replacements = {
           raw,
-          hrp: type,
+          hrp,
           hex:
-            type === 'npub' || type === 'note'
+            hrp === 'npub' || hrp === 'note'
               ? data
-              : type === 'nprofile'
+              : hrp === 'nprofile'
               ? data.pubkey
-              : type === 'nevent'
+              : hrp === 'nevent'
               ? data.id
               : null,
-          p_or_e: {npub: 'p', note: 'e', nprofile: 'p', nevent: 'e'}[type],
-          u_or_n: {npub: 'u', note: 'n', nprofile: 'u', nevent: 'n'}[type],
-          relay0: type === 'nprofile' ? data.relays[0] : null,
-          relay1: type === 'nprofile' ? data.relays[1] : null,
-          relay2: type === 'nprofile' ? data.relays[2] : null
+          p_or_e: {npub: 'p', note: 'e', nprofile: 'p', nevent: 'e'}[hrp],
+          u_or_n: {npub: 'u', note: 'n', nprofile: 'u', nevent: 'n'}[hrp],
+          relay0: hrp === 'nprofile' || hrp === 'nevent' ? data.relays[0] : null,
+          relay1: hrp === 'nprofile' || hrp === 'nevent' ? data.relays[1] : null,
+          relay2: hrp === 'nprofile' || hrp === 'nevent' ? data.relays[2] : null
         }
         let result = ph
         Object.entries(replacements).forEach(([pattern, value]) => {
-          result = result.replace(new RegExp(`{ *${pattern} *}`, 'g'), value)
+          result = result.replace(new RegExp(`{ *${pattern} *}`, 'g'), value || '')
         })
 
         return result
@@ -126,7 +131,7 @@ async function handleContentScriptMessage({type, params, host}) {
 
     return
   } else {
-    releasePromptMutex = await promptMutex.acquire()
+    if (!acquirePromptMutex()) return {error: {message: 'prompt in progress'}}
 
     console.log('Performing operation:', type)
 
@@ -161,7 +166,7 @@ async function handleContentScriptMessage({type, params, host}) {
         if (sideEffectTypes.has(type)) {
           // For side-effect ops, prompt FIRST, then perform if accepted
           const {top, left} = await getPosition(width, height)
-          let accept = await new Promise((resolve, reject) => {
+          let {accept, conditions} = await new Promise((resolve, reject) => {
             openPrompt = {resolve, reject}
 
             browser.windows.create({
@@ -178,6 +183,8 @@ async function handleContentScriptMessage({type, params, host}) {
             releasePromptMutex()
             return {error: {message: 'denied'}}
           }
+
+          if (conditions) await updatePermission(host, type, accept, conditions)
 
           // Now perform after accept
           finalResult = await performOperation(type, params)
@@ -189,7 +196,7 @@ async function handleContentScriptMessage({type, params, host}) {
           }
 
           const {top, left} = await getPosition(width, height)
-          let accept = await new Promise((resolve, reject) => {
+          let {accept, conditions} = await new Promise((resolve, reject) => {
             openPrompt = {resolve, reject}
 
             browser.windows.create({
@@ -206,6 +213,8 @@ async function handleContentScriptMessage({type, params, host}) {
             releasePromptMutex()
             return {error: {message: 'denied'}}
           }
+
+          if (conditions) await updatePermission(host, type, accept, conditions)
         }
       } catch (err) {
         releasePromptMutex()
@@ -272,11 +281,7 @@ async function performOperation(type, params) {
 }
 
 async function handlePromptMessage({host, type, accept, conditions}, sender) {
-  openPrompt?.resolve?.(accept)
-
-  if (conditions) {
-    await updatePermission(host, type, accept, conditions)
-  }
+  openPrompt?.resolve?.({accept, conditions})
 
   openPrompt = null
 
@@ -395,8 +400,9 @@ async function sendTip (senderNpub, nsec, recipientNpub, amountSat, notify) {  /
     const recipientAddress = await getCashAddress('bitcoincash', 'p2pkh', recipientPkh)  // Use same function
 
     // Pre-balance check with dynamic fee
-    const balance = BigInt(await getBCHBalance(senderAddress))  // sat
-    console.log('Sender balance:', balance.toString(), 'sat')
+    const balanceBCH = await getBCHBalance(senderAddress)  // Assume decimal BCH
+    const balance = BigInt(Math.floor(balanceBCH * 100000000))  // To sats
+    console.log('Sender balance:', balance.toString(), 'sats (', balanceBCH.toFixed(8), ' BCH)')
     let feeRateNum = await getFeeRate()  // number
     const feeRate = BigInt(Math.max(feeRateNum, 1))  // Ensure at least 1 sat/byte
     console.log('Current fee rate:', feeRate.toString(), 'sat/byte')
@@ -414,6 +420,7 @@ async function sendTip (senderNpub, nsec, recipientNpub, amountSat, notify) {  /
       console.error('No UTXOs found')
       return { success: false, error: 'No UTXOs found' }
     }
+    console.log('Fetched UTXOs:', utxos);  // Log UTXOs for debug
 
     // Est fee based on potential inputs/outputs (conservative: assume 2 inputs, 2 outputs)
     const estInputs = Math.min(utxos.length, 2)
@@ -423,23 +430,32 @@ async function sendTip (senderNpub, nsec, recipientNpub, amountSat, notify) {  /
     const minRequired = BigInt(amountSat) + estFee + dustLimit  // Extra buffer for change/dust
     if (balance < minRequired) {
       console.error('Insufficient balance:', balance.toString(), ' < ', minRequired.toString())
-      return { success: false, error: `Insufficient balance: ${balance} sat available. Need at least ${minRequired} sat for tip + fee.` }
+      return { success: false, error: `Insufficient balance: ${balance.toString()} sats available (${balanceBCH.toFixed(8)} BCH). Need at least ${minRequired.toString()} sats for tip + fee.` }
     }
 
-    const sha256Instance = await instantiateSha256()
-    const sha256Hash = sha256Instance.hash
-
     return new Promise((resolve) => {
-      sendTransaction(senderAddress, recipientAddress, BigInt(amountSat), utxos, sha256Hash, privBytes, feeRate, (err, txId) => {  // Remove async from callback
+      sendTransaction(senderAddress, recipientAddress, BigInt(amountSat), utxos, sha256, privBytes, feeRate, (err, txId) => {
         if (err) {
           console.error('sendTransaction error:', err);
+          browser.notifications.create({
+            type: 'basic',
+            iconUrl: browser.runtime.getURL('icon-48.png'),
+            title: 'Tip Failed',
+            message: err.message || 'Unknown error during tip'
+          });
           resolve({ success: false, error: err.message });
         } else {
           console.log('sendTransaction success:', txId);
+          browser.notifications.create({
+            type: 'basic',
+            iconUrl: browser.runtime.getURL('icon-48.png'),
+            title: 'Tip Success',
+            message: `Tipped ${amountSat} sats to ${recipientNpub}! Tx: ${txId}`
+          });
           if (notify) {
             publishTipNote(sk, recipientNpub, amountSat, txId)
               .then(() => console.log('Tip notification published successfully'))
-              .catch(notifyErr => console.error('Failed to publish tip notification:', notifyErr));  // Fire-and-forget
+              .catch(notifyErr => console.error('Failed to publish tip notification:', notifyErr));
           }
           resolve({ success: true, txId });
         }
@@ -451,16 +467,16 @@ async function sendTip (senderNpub, nsec, recipientNpub, amountSat, notify) {  /
   }
 }
 
-// Helper for cash address (async, since libauth dynamic, but call it in async context)
+// Helper for cash address
 async function getCashAddress(prefix, type, hash) {
   const { encodeCashAddress } = await import('@bitauth/libauth');
   return encodeCashAddress(prefix, type, hash);
 }
 
 async function publishTipNote(sk, recipientNpub, amountSat, txId) {
-  const { SimplePool } = await import('nostr-tools/pool');  // Dynamic import for MV3 safety
+  const { SimplePool } = await import('nostr-tools/pool');
 
-  const relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://eden.nostr.land'];  // Default reliable relays
+  const relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://eden.nostr.land'];
   const pool = new SimplePool();
 
   let recipientHex;
@@ -476,14 +492,14 @@ async function publishTipNote(sk, recipientNpub, amountSat, txId) {
   const event = {
     kind: 1,
     created_at: Math.floor(Date.now() / 1000),
-    tags: [['p', recipientHex]],  // Tag recipient
-    content: `Tipped ${amountSat} sat BCH to ${recipientNpub}! Tx: https://blockchair.com/bitcoin-cash/transaction/${txId} #BCHonNostr\n\nInstall nos2bch extension to claim your tips: https://chromewebstore.google.com/detail/nos2bch/{extension-id}`,  // Replace {extension-id} with actual ID
+    tags: [['p', recipientHex]],
+    content: `Tipped ${amountSat} sat BCH to ${recipientNpub}! Tx: https://blockchair.com/bitcoin-cash/transaction/${txId} #BCHonNostr\n\nInstall nos2bch extension to claim your tips: https://chromewebstore.google.com/detail/nos2bch/{extension-id}`,
     pubkey,
   };
 
   const signedEvent = finalizeEvent(event, sk);
-  await Promise.any(pool.publish(relays, signedEvent));  // Publish to at least one relay
-  pool.destroy();  // Clean up (MV3: avoid lingering connections)
+  await Promise.any(pool.publish(relays, signedEvent));
+  pool.destroy();
 }
 
 function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha256, privBytes, feeRate, callback) {
@@ -492,7 +508,7 @@ function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha
     try {
       const {selected: inputs, total: totalInput} = await selectUtxos(utxos, amountSat, feeRate)
       const inputCount = inputs.length
-      const estSize = 10 + inputCount * 148 + 68  // 2 outputs max (tip + change)
+      const estSize = 10 + inputCount * 148 + 68
       let fee = BigInt(estSize) * BigInt(feeRate)
       let change = totalInput - amountSat - fee
       if (change < 0n) throw new Error('Insufficient funds after fee calc')
@@ -518,24 +534,29 @@ function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha
           lockingBytecode: await _buildP2PKHOutput(senderAddress)
         })
       } else {
-        // Recalc fee without change output
-        fee += 34n * BigInt(feeRate)  // Extra for omitted output
+        fee += 34n * BigInt(feeRate)
         change = totalInput - amountSat - fee
         if (change < 0n) throw new Error('Insufficient funds')
       }
 
-      transaction.inputs.forEach((input, i) => {
-        const coveredBytecode = libauth.hexToBin(utxos[i].scriptPubKey || toScriptPubKey(senderAddress))  // Fallback if no scriptPubKey
+      for (let i = 0; i < transaction.inputs.length; i++) {
+        const utxo = utxos[i]
+        let coveredBytecode
+        if (utxo.scriptPubKey) {
+          coveredBytecode = libauth.hexToBin(utxo.scriptPubKey)
+        } else {
+          coveredBytecode = await _buildP2PKHOutput(senderAddress)
+        }
         const transactionOutpointsHash = sha256(sha256(libauth.encodeTransactionOutpoints(transaction.inputs)))
         const transactionSequenceNumbersHash = sha256(sha256(libauth.encodeTransactionInputSequenceNumbersForSigning(transaction.inputs)))
         const transactionOutputsHash = sha256(sha256(libauth.encodeTransactionOutputs(transaction.outputs)))
         const preimage = libauth.generateSigningSerializationBCH({
           forkId: BigInt(0),
           coveredBytecode,
-          outpointTransactionHash: input.outpointTransactionHash,
-          outpointIndex: input.outpointIndex,
-          sequenceNumber: input.sequenceNumber,
-          valueSatoshis: BigInt(utxos[i].value),
+          outpointTransactionHash: transaction.inputs[i].outpointTransactionHash,
+          outpointIndex: transaction.inputs[i].outpointIndex,
+          sequenceNumber: transaction.inputs[i].sequenceNumber,
+          valueSatoshis: BigInt(utxo.value),
           version: transaction.version,
           transactionOutpointsHash,
           transactionSequenceNumbersHash,
@@ -548,11 +569,11 @@ function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha
         const derSig = _encodeDer(sig.r, sig.s)
         const sigWithType = new Uint8Array([...derSig, 0x41])
         const pubkey = secp.getPublicKey(privBytes, true)
-        input.unlockingBytecode = new Uint8Array([sigWithType.length, ...sigWithType, pubkey.length, ...pubkey])
-      })
+        transaction.inputs[i].unlockingBytecode = new Uint8Array([sigWithType.length, ...sigWithType, pubkey.length, ...pubkey])
+      }
 
       const rawTx = libauth.binToHex(libauth.encodeTransaction(transaction))
-
+      console.log('Built rawTx:', rawTx)
       const txId = await broadcastTx(rawTx)
       callback(null, txId)
     } catch (err) {
@@ -563,11 +584,4 @@ function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha
   })
 }
 
-function toScriptPubKey(address) {
-  // Fallback: hardcode P2PKH script assuming address is cashaddr; in practice, parse hash
-  // For working, assume utxos have scriptPubKey; this is placeholder
-  const dummyPkh = new Uint8Array(20).fill(0); // Replace with actual decode
-  return hexToBytes('76a914' + bytesToHex(dummyPkh) + '88ac');
-}
-
-console.log('Background script loaded successfully');
+console.log('Background script loaded successfully');  // Debug log for successful parse/load
