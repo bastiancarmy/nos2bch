@@ -1,3 +1,4 @@
+// extension/popup.jsx - Added try/catch for derive errors; no other changes.
 import {getPublicKey} from 'nostr-tools'
 import * as nip19 from 'nostr-tools/nip19'
 import {hexToBytes} from '@noble/hashes/utils'
@@ -34,11 +35,15 @@ function Popup() {
       if (results.private_key) {
         const sk = results.private_key // Hex string
         setPrivKey(sk)
-        const pk = getPublicKey(sk)
-        setNpub(nip19.npubEncode(pk))
-        const address = await deriveBCHAddress(pk) // Now await
-        setBchAddress(address)
-        refreshBalance(address)
+        const pubHex = getPublicKey(sk)
+        setNpub(nip19.npubEncode(pubHex))
+        try {
+          const address = await deriveBCHAddress(pubHex) // Await
+          setBchAddress(address)
+          refreshBalance(address)
+        } catch (err) {
+          setError('Address derivation failed: ' + err.message)
+        }
       } else {
         setError('No private key set. Please configure in options.')
       }
