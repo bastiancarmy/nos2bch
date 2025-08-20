@@ -18,6 +18,8 @@ import * as secp from '@noble/secp256k1'
 import { hmac } from '@noble/hashes/hmac'
 import { sha256 } from '@noble/hashes/sha256'
 import { ripemd160 } from '@noble/hashes/ripemd160'
+import { hexToBytes } from '@noble/hashes/utils';
+
 console.log('Background script starting to load...'); // Debug log for registration
 // Enable sync methods in secp
 secp.etc.hmacSha256Sync = (k, ...m) => hmac(sha256, k, secp.etc.concatBytes(...m))
@@ -237,7 +239,7 @@ async function performOperation(type, params) {
       case 'tipBCH': {
         const { recipientNpub, amountSat, notify = false } = params;
         console.log('Performing tipBCH to', recipientNpub, 'amount', amountSat, 'notify', notify);
-        const nsec = nip19.nsecEncode(secp.utils.hexToBytes(sk));
+        const nsec = nip19.nsecEncode(hexToBytes(sk));
         const senderNpub = nip19.npubEncode(getPublicKey(sk));
 
         // Lazy-create worker if needed
@@ -273,7 +275,11 @@ async function handlePromptMessage({host, type, accept, conditions}, sender) {
   openPrompt = null
   releasePromptMutex()
   if (sender) {
-    browser.windows.remove(sender.tab.windowId)
+    if (sender.tab && sender.tab.windowId) {
+      browser.windows.remove(sender.tab.windowId).catch(() => {
+        // Ignore if window already closed
+      });
+    }
   }
 }
 async function openSignUpWindow() {

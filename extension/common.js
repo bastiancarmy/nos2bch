@@ -172,6 +172,58 @@ export async function getPosition(width, height) {
 
 // --- Added BCH Functions ---
 
+export function _hash160(x) {
+  return ripemd160(sha256(x));
+}
+
+export function _encodeDer(r, s) {
+  function encodeInt(val) {
+    let bytes = [];
+    let tmp = val;
+    if (tmp === 0n) bytes.push(0);
+    while (tmp > 0n) {
+      bytes.push(Number(tmp & 0xffn));
+      tmp >>= 8n;
+    }
+    bytes = bytes.reverse();
+    if (bytes[0] & 0x80) bytes.unshift(0);
+    return new Uint8Array([0x02, bytes.length, ...bytes]);
+  }
+  const rEnc = encodeInt(r);
+  const sEnc = encodeInt(s);
+  const totalLen = rEnc.length + sEnc.length;
+  return new Uint8Array([0x30, totalLen, ...rEnc, ...sEnc]);
+}
+
+export async function _buildP2PKHOutput(address) {
+  const libauth = await import('@bitauth/libauth');
+  const { cashAddressToLockingBytecode } = libauth;
+  const result = cashAddressToLockingBytecode(address);
+  if (typeof result === 'string') throw new Error(result);
+  return result.bytecode;
+}
+
+export async function getCashAddress(publicKey) {  // Alias for deriveBCHAddress, but takes pub bytes
+  const libauth = await import('@bitauth/libauth');
+  const { publicKeyToP2pkhCashAddress } = libauth;
+  const result = publicKeyToP2pkhCashAddress({ publicKey });
+  if (typeof result === 'string') return result;
+  throw new Error('Invalid public key for address derivation');
+}
+
+// Update getBCHBalance to optionally return sats (for consistency with worker)
+export async function getBCHBalance(address, inSats = false) {
+  const client = await connectElectrum();
+  try {
+    const balance = await client.request('blockchain.scripthash.get_balance', addressToScripthash(address));
+    const totalSats = balance.confirmed + balance.unconfirmed;
+    return inSats ? totalSats : totalSats / 100000000;
+  } catch (err) {
+    console.error('Electrum balance fetch failed:', err);
+    return 0;
+  }
+}
+
 export function deriveBCHAddress(pubHex) {
   let compressedPub
   try {
@@ -187,17 +239,6 @@ export function deriveBCHAddress(pubHex) {
   const prefix = 'bitcoincash';
   const type = 'P2PKH';
   return cashEncode(prefix, type, pkh);
-}
-
-export async function getBCHBalance(address) {
-  const client = await connectElectrum();
-  try {
-    const balance = await client.request('blockchain.scripthash.get_balance', addressToScripthash(address));
-    return (balance.confirmed + balance.unconfirmed) / 100000000;  // Sat to BCH
-  } catch (err) {
-    console.error('Electrum balance fetch failed:', err);
-    return 0;
-  }
 }
 
 export async function getTxHistory(address) {
@@ -230,7 +271,7 @@ export async function getFeeRate() {
     return feeRate
   } catch (err) {
     console.error('Electrum fee fetch failed:', err);
-    return 1;  // Fallback
+    return 1; 
   }
 }
 

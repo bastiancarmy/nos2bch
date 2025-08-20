@@ -3,7 +3,17 @@ import { getPublicKey } from 'nostr-tools/pure';
 import * as nip19 from 'nostr-tools/nip19';
 import * as secp from '@noble/secp256k1';
 import { sha256 } from '@noble/hashes/sha256';
-import { ripemd160 } from '@noble/hashes/ripemd160';
+
+import {
+  _hash160,
+  _encodeDer,
+  _buildP2PKHOutput,
+  getCashAddress,
+  getBCHBalance,
+  getUtxos,
+  getFeeRate,
+  broadcastTx
+} from './common';
 
 // Retry wrapper
 function withRetry(fn, attempts = 3) {
@@ -19,97 +29,28 @@ function withRetry(fn, attempts = 3) {
   };
 }
 
-// API fetch functions (Blockchair)
-const getBalanceSats = withRetry(async (address) => {
-  const res = await fetch(`https://api.blockchair.com/bitcoin-cash/dashboards/address/${address}`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const { data } = await res.json();
-  const addrData = data[address];
-  if (!addrData) throw new Error('Invalid address response');
-  return addrData.address.balance;
-});
-
-const getUtxos = withRetry(async (address) => {
-  const res = await fetch(`https://api.blockchair.com/bitcoin-cash/dashboards/address/${address}?limit=100`);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const { data } = await res.json();
-  const addrData = data[address];
-  if (!addrData) throw new Error('Invalid address response');
-  return addrData.utxo.map(u => ({
-    txid: u.transaction_hash,
-    vout: u.index,
-    value: u.value
-  }));
-});
-
-const getFeeRate = withRetry(async () => {
-  const res = await fetch('https://api.blockchair.com/bitcoin-cash/stats');
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const { data } = await res.json();
-  return data.suggested_transaction_fee_per_byte_sat;
-});
-
-const broadcastTx = withRetry(async (hex) => {
-  const res = await fetch('https://api.blockchair.com/bitcoin-cash/push/transaction', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ data: hex })
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const json = await res.json();
-  if (json.data && json.data.transaction_hash) return json.data.transaction_hash;
-  throw new Error(json.context?.error || 'Broadcast failed');
-});
+// Wrap common functions with retry if needed (e.g., for network flakiness)
+const getBalanceSats = withRetry(async (address) => await getBCHBalance(address, true));
+const getUtxosWrapped = withRetry(getUtxos);
+const getFeeRateWrapped = withRetry(getFeeRate);
+const broadcastTxWrapped = withRetry(broadcastTx);
 
 // Listen for messages from background.js
 self.onmessage = async (event) => {
   const { action, params } = event.data;
-  if (action === 'sendTip') {
-    const result = await sendTip(params.senderNpub, params.nsec, params.recipientNpub, params.amountSat, params.notify);
-    event.ports[0].postMessage(result); // Respond via MessagePort
+  const port = event.ports[0];
+  try {
+    if (action === 'sendTip') {
+      const result = await sendTip(params.senderNpub, params.nsec, params.recipientNpub, params.amountSat, params.notify);
+      port.postMessage(result); // Respond via MessagePort
+    }
+  } catch (err) {
+    console.error('Worker error:', err);
+    port.postMessage({ success: false, error: err.message });
   }
 };
 
 // --- BCH Helpers ---
-function _hash160(x) {
-  return ripemd160(sha256(x));
-}
-
-function _encodeDer(r, s) {
-  function encodeInt(val) {
-    let bytes = [];
-    let tmp = val;
-    if (tmp === 0n) bytes.push(0);
-    while (tmp > 0n) {
-      bytes.push(Number(tmp & 0xffn));
-      tmp >>= 8n;
-    }
-    bytes = bytes.reverse();
-    if (bytes[0] & 0x80) bytes.unshift(0);
-    return new Uint8Array([0x02, bytes.length, ...bytes]);
-  }
-  const rEnc = encodeInt(r);
-  const sEnc = encodeInt(s);
-  const totalLen = rEnc.length + sEnc.length;
-  return new Uint8Array([0x30, totalLen, ...rEnc, ...sEnc]);
-}
-
-async function _buildP2PKHOutput(address) {
-  const libauth = await import('@bitauth/libauth');
-  const { cashAddressToLockingBytecode } = libauth;
-  const result = cashAddressToLockingBytecode(address);
-  if (typeof result === 'string') throw new Error(result);
-  return result.bytecode;
-}
-
-async function getCashAddress(publicKey) {
-  const libauth = await import('@bitauth/libauth');
-  const { publicKeyToP2pkhCashAddress } = libauth;
-  const result = publicKeyToP2pkhCashAddress({ publicKey });
-  if (typeof result === 'string') return result;
-  throw new Error('Invalid public key for address derivation');
-}
-
 async function selectUtxos(utxos, targetAmount, feeRate) {
   utxos = utxos.filter(utxo => utxo.value >= 546); // Skip dust
   utxos.sort((a, b) => b.value - a.value); // Descending
@@ -151,12 +92,12 @@ async function sendTip(senderNpub, nsec, recipientNpub, amountSat, notify) {
     const recipientAddress = await getCashAddress(recipientCompressedPub);
 
     const balance = BigInt(await getBalanceSats(senderAddress));
-    const feeRate = BigInt(Math.max(await getFeeRate(), 1));
+    const feeRate = BigInt(Math.max(await getFeeRateWrapped(), 1));
     const dustLimit = 546n;
     if (balance === 0n) return { success: false, error: 'No balance available' };
     if (balance < dustLimit) return { success: false, error: 'Dust balance only - cannot tip' };
 
-    const utxos = await getUtxos(senderAddress);
+    const utxos = await getUtxosWrapped(senderAddress);
     if (!utxos.length) return { success: false, error: 'No UTXOs found' };
 
     const estInputs = Math.min(utxos.length, 2);
@@ -166,92 +107,88 @@ async function sendTip(senderNpub, nsec, recipientNpub, amountSat, notify) {
     const minRequired = amountSat + estFee + dustLimit;
     if (balance < minRequired) return { success: false, error: `Insufficient balance: ${balance} sats. Need at least ${minRequired} sats.` };
 
-    return new Promise((resolve) => {
-      sendTransaction(senderAddress, recipientAddress, amountSat, utxos, sha256, privBytes, feeRate, (err, txId) => {
-        if (err) {
-          console.error('sendTransaction error:', err);
-          resolve({ success: false, error: err.message });
-        } else {
-          console.log('sendTransaction success:', txId);
-          resolve({ success: true, txId });
-        }
-      });
-    });
+    const txId = await sendTransaction(senderAddress, recipientAddress, amountSat, utxos, sha256, privBytes, feeRate);
+    return { success: true, txId };
   } catch (err) {
     console.error('sendTip error:', err);
     return { success: false, error: err.message };
   }
 }
 
-function sendTransaction(senderAddress, recipientAddress, amountSat, utxos, sha256, privBytes, feeRate, callback) {
-  import('@bitauth/libauth').then(async (libauth) => {
-    try {
-      const { selected: inputs, total: totalInput } = await selectUtxos(utxos, amountSat, feeRate);
-      let fee = BigInt(10 + inputs.length * 148 + 68) * feeRate;
-      let change = totalInput - amountSat - fee;
-      if (change < 0n) throw new Error('Insufficient funds after fee calc');
+async function sendTransaction(senderAddress, recipientAddress, amountSat, utxos, sha256, privBytes, feeRate) {
+  const libauth = await import('@bitauth/libauth');
+  try {
+    const { selected: inputs, total: totalInput } = await selectUtxos(utxos, amountSat, feeRate);
+    let fee = BigInt(10 + inputs.length * 148 + 68) * feeRate; // Base fee estimate
+    let change = totalInput - amountSat - fee;
+    if (change < 0n) throw new Error('Insufficient funds after fee calc');
 
-      const transaction = {
-        version: 2,
-        inputs: inputs.map(utxo => ({
-          outpointTransactionHash: libauth.hexToBin(utxo.txid),
-          outpointIndex: utxo.vout,
-          unlockingBytecode: new Uint8Array(),
-          sequenceNumber: 0xffffffff
-        })),
-        outputs: [{
-          valueSatoshis: amountSat,
-          lockingBytecode: await _buildP2PKHOutput(recipientAddress)
-        }],
-        locktime: 0
-      };
+    const transaction = {
+      version: 2,
+      inputs: inputs.map(utxo => ({
+        outpointTransactionHash: libauth.hexToBin(utxo.txid),
+        outpointIndex: utxo.vout,
+        unlockingBytecode: new Uint8Array(),
+        sequenceNumber: 0xffffffff
+      })),
+      outputs: [{
+        valueSatoshis: amountSat,
+        lockingBytecode: await _buildP2PKHOutput(recipientAddress)
+      }],
+      locktime: 0
+    };
 
+    // Add change if viable, recalc fee if needed (loop for precision)
+    let attempts = 0;
+    while (attempts < 3) { // Prevent infinite loop
       if (change >= 546n) {
         transaction.outputs.push({
           valueSatoshis: change,
           lockingBytecode: await _buildP2PKHOutput(senderAddress)
         });
-      } else {
-        fee += 34n * feeRate;
-        change = totalInput - amountSat - fee;
-        if (change < 0n) throw new Error('Insufficient funds');
       }
-
-      for (let i = 0; i < transaction.inputs.length; i++) {
-        const utxo = inputs[i];
-        let coveredBytecode = utxo.scriptPubKey ? libauth.hexToBin(utxo.scriptPubKey) : await _buildP2PKHOutput(senderAddress);
-        const transactionOutpointsHash = sha256(sha256(libauth.encodeTransactionOutpoints(transaction.inputs)));
-        const transactionSequenceNumbersHash = sha256(sha256(libauth.encodeTransactionInputSequenceNumbersForSigning(transaction.inputs)));
-        const transactionOutputsHash = sha256(sha256(libauth.encodeTransactionOutputs(transaction.outputs)));
-        const preimage = libauth.generateSigningSerializationBCH({
-          forkId: BigInt(0),
-          coveredBytecode,
-          outpointTransactionHash: transaction.inputs[i].outpointTransactionHash,
-          outpointIndex: transaction.inputs[i].outpointIndex,
-          sequenceNumber: transaction.inputs[i].sequenceNumber,
-          valueSatoshis: BigInt(utxo.value),
-          version: transaction.version,
-          transactionOutpointsHash,
-          transactionSequenceNumbersHash,
-          transactionOutputsHash,
-          locktime: transaction.locktime,
-          signingSerializationType: BigInt(0x41)
-        });
-        const message = sha256(sha256(preimage));
-        const sig = secp.sign(message, privBytes, { der: false });
-        const derSig = _encodeDer(sig.r, sig.s);
-        const sigWithType = new Uint8Array([...derSig, 0x41]);
-        const pubkey = secp.getPublicKey(privBytes, true);
-        transaction.inputs[i].unlockingBytecode = new Uint8Array([sigWithType.length, ...sigWithType, pubkey.length, ...pubkey]);
-      }
-
-      const rawTx = libauth.binToHex(libauth.encodeTransaction(transaction));
-      const txId = await broadcastTx(rawTx);
-      callback(null, txId);
-    } catch (err) {
-      callback(err);
+      // Recalc exact fee based on current outputs
+      const newFee = BigInt(10 + inputs.length * 148 + transaction.outputs.length * 34) * feeRate;
+      if (newFee === fee) break; // Converged
+      fee = newFee;
+      change = totalInput - amountSat - fee;
+      if (change < 0n) throw new Error('Insufficient funds');
+      transaction.outputs = transaction.outputs.slice(0, 1); // Reset change output
+      attempts++;
     }
-  }).catch((importErr) => {
-    callback(new Error('Failed to load transaction library: ' + importErr.message));
-  });
+    if (attempts === 3) throw new Error('Fee calculation failed to converge');
+
+    for (let i = 0; i < transaction.inputs.length; i++) {
+      const utxo = inputs[i];
+      let coveredBytecode = utxo.scriptPubKey ? libauth.hexToBin(utxo.scriptPubKey) : await _buildP2PKHOutput(senderAddress);
+      const transactionOutpointsHash = sha256(sha256(libauth.encodeTransactionOutpoints(transaction.inputs)));
+      const transactionSequenceNumbersHash = sha256(sha256(libauth.encodeTransactionInputSequenceNumbersForSigning(transaction.inputs)));
+      const transactionOutputsHash = sha256(sha256(libauth.encodeTransactionOutputs(transaction.outputs)));
+      const preimage = libauth.generateSigningSerializationBCH({
+        forkId: BigInt(0),
+        coveredBytecode,
+        outpointTransactionHash: transaction.inputs[i].outpointTransactionHash,
+        outpointIndex: transaction.inputs[i].outpointIndex,
+        sequenceNumber: transaction.inputs[i].sequenceNumber,
+        valueSatoshis: BigInt(utxo.value),
+        version: transaction.version,
+        transactionOutpointsHash,
+        transactionSequenceNumbersHash,
+        transactionOutputsHash,
+        locktime: transaction.locktime,
+        signingSerializationType: BigInt(0x41)
+      });
+      const message = sha256(sha256(preimage));
+      const sig = secp.sign(message, privBytes, { der: false, lowS: true }); // Ensure low-S for canonical sig
+      const derSig = _encodeDer(sig.r, sig.s);
+      const sigWithType = new Uint8Array([...derSig, 0x41]);
+      const pubkey = secp.getPublicKey(privBytes, true);
+      transaction.inputs[i].unlockingBytecode = new Uint8Array([sigWithType.length, ...sigWithType, pubkey.length, ...pubkey]);
+    }
+
+    const rawTx = libauth.binToHex(libauth.encodeTransaction(transaction));
+    return await broadcastTx(rawTx);
+  } catch (err) {
+    throw new Error('Failed to build/broadcast transaction: ' + err.message);
+  }
 }
