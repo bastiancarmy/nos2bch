@@ -28,7 +28,7 @@
       "type": "module"
     }
   ],
-  "permissions": ["storage", "activeTab", "windows"],
+  "permissions": ["storage", "activeTab", "windows", "offscreen"],
   "host_permissions": ["https://api.fullstack.cash/*", "https://iris.to/*", "https://api.blockchair.com/*"],
   "optional_permissions": ["notifications"],
   "web_accessible_resources": [

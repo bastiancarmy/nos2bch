@@ -214,13 +214,18 @@ export async function getCashAddress(publicKey) {  // Alias for deriveBCHAddress
 // Update getBCHBalance to optionally return sats (for consistency with worker)
 export async function getBCHBalance(address, inSats = false) {
   const client = await connectElectrum();
-  try {
-    const balance = await client.request('blockchain.scripthash.get_balance', addressToScripthash(address));
-    const totalSats = balance.confirmed + balance.unconfirmed;
-    return inSats ? totalSats : totalSats / 100000000;
-  } catch (err) {
-    console.error('Electrum balance fetch failed:', err);
-    return 0;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const balance = await client.request('blockchain.scripthash.get_balance', addressToScripthash(address));
+      const totalSats = balance.confirmed + balance.unconfirmed;
+      return inSats ? totalSats : totalSats / 100000000;
+    } catch (err) {
+      console.error(`Electrum balance fetch attempt ${attempt} failed:`, err);
+      if (attempt === 3) {
+        console.error('Electrum balance fetch failed after retries:', err);
+        return 0;
+      }
+    }
   }
 }
 
@@ -264,41 +269,56 @@ export async function getFeeRate() {
     return lastFeeRate
   }
   const client = await connectElectrum();
-  try {
-    const fee = await client.request('blockchain.estimatefee', 2);  // Estimate for 2 blocks (fast)
-    const feeRate = Math.max(1, Math.round(fee * 100000000));  // BCH to sat/byte
-    await browser.storage.local.set({lastFeeRate: feeRate, lastFeeRateTime: Date.now()})
-    return feeRate
-  } catch (err) {
-    console.error('Electrum fee fetch failed:', err);
-    return 1; 
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const fee = await client.request('blockchain.estimatefee', 2);  // Estimate for 2 blocks (fast)
+      const feeRate = Math.max(1, Math.round(fee * 100000000));  // BCH to sat/byte
+      await browser.storage.local.set({lastFeeRate: feeRate, lastFeeRateTime: Date.now()})
+      return feeRate
+    } catch (err) {
+      console.error(`Electrum fee fetch attempt ${attempt} failed:`, err);
+      if (attempt === 3) {
+        console.error('Electrum fee fetch failed after retries:', err);
+        return 1; 
+      }
+    }
   }
 }
 
 export async function getUtxos(address) {
   const client = await connectElectrum();
-  try {
-    const utxos = await client.request('blockchain.scripthash.listunspent', addressToScripthash(address));
-    return utxos.map(utxo => ({
-      txid: utxo.tx_hash,
-      vout: utxo.tx_pos,
-      value: utxo.value,
-      scriptPubKey: utxo.script_pubkey  // If needed for signing
-    }));
-  } catch (err) {
-    console.error('Electrum UTXO fetch failed:', err);
-    return [];
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const utxos = await client.request('blockchain.scripthash.listunspent', addressToScripthash(address));
+      return utxos.map(utxo => ({
+        txid: utxo.tx_hash,
+        vout: utxo.tx_pos,
+        value: utxo.value,
+        scriptPubKey: utxo.script_pubkey  // If needed for signing
+      }));
+    } catch (err) {
+      console.error(`Electrum UTXO fetch attempt ${attempt} failed:`, err);
+      if (attempt === 3) {
+        console.error('Electrum UTXO fetch failed after retries:', err);
+        return [];
+      }
+    }
   }
 }
 
 export async function broadcastTx(rawTx) {
   const client = await connectElectrum();
-  try {
-    const txid = await client.request('blockchain.transaction.broadcast', rawTx);
-    return txid;
-  } catch (err) {
-    console.error('Electrum broadcast failed:', err);
-    throw err;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const txid = await client.request('blockchain.transaction.broadcast', rawTx);
+      return txid;
+    } catch (err) {
+      console.error(`Electrum broadcast attempt ${attempt} failed:`, err);
+      if (attempt === 3) {
+        console.error('Electrum broadcast failed after retries:', err);
+        throw err;
+      }
+    }
   }
 }
 

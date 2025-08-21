@@ -20,7 +20,7 @@ import { sha256 } from '@noble/hashes/sha256'
 import { ripemd160 } from '@noble/hashes/ripemd160'
 import { hexToBytes } from '@noble/hashes/utils';
 
-console.log('Background script starting to load...'); // Debug log for registration
+console.log('Background script starting to load...');
 // Enable sync methods in secp
 secp.etc.hmacSha256Sync = (k, ...m) => hmac(sha256, k, secp.etc.concatBytes(...m))
 let openPrompt = null
@@ -41,7 +41,8 @@ function getSharedSecret(sk, peer) {
 }
 const width = 440
 const height = 420
-const sideEffectTypes = new Set(['tipBCH']) // Types with side effects (e.g., broadcast tx)
+const sideEffectTypes = new Set(['tipBCH'])
+const defaultRelays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr-pub.wellorder.net'];
 browser.runtime.onInstalled.addListener((_, __, reason) => {
   if (reason === 'install') browser.runtime.openOptionsPage()
 })
@@ -143,7 +144,6 @@ async function handleContentScriptMessage({type, params, host}) {
           type
         })
         if (sideEffectTypes.has(type)) {
-          // For side-effect ops, prompt FIRST, then perform if accepted
           const {top, left} = await getPosition(width, height)
           let {accept, conditions} = await new Promise((resolve, reject) => {
             openPrompt = {resolve, reject}
@@ -161,10 +161,8 @@ async function handleContentScriptMessage({type, params, host}) {
             return {error: {message: 'denied'}}
           }
           if (conditions) await updatePermission(host, type, accept, conditions)
-          // Now perform after accept
           finalResult = await performOperation(type, params)
         } else {
-          // For non-side-effect ops, perform first, then prompt
           finalResult = await performOperation(type, params)
           if (typeof finalResult === 'string') {
             qs.set('result', finalResult)
@@ -199,7 +197,35 @@ async function handleContentScriptMessage({type, params, host}) {
 }
 
 // Worker instance (lazy-loaded)
-let tipWorker = null;
+// let tipWorker = null;
+
+// Global to track offscreen creation promise
+let creatingOffscreen = null;
+
+// Function to ensure offscreen document exists
+async function setupOffscreenDocument() {
+  const offscreenUrl = chrome.runtime.getURL('offscreen.html');
+  // Check for existing offscreen document (Chrome 116+)
+  const existingContexts = await chrome.runtime.getContexts({
+    contextTypes: ['OFFSCREEN_DOCUMENT'],
+    documentUrls: [offscreenUrl]
+  });
+  if (existingContexts.length > 0) {
+    return;
+  }
+  // Avoid concurrency issues
+  if (creatingOffscreen) {
+    await creatingOffscreen;
+  } else {
+    creatingOffscreen = chrome.offscreen.createDocument({
+      url: 'offscreen.html',
+      reasons: ['WORKERS'],  // Or 'DOM_PARSER' if more fitting; 'WORKERS' for heavy computation
+      justification: 'Offload BCH transaction signing and crypto operations to avoid blocking service worker.'
+    });
+    await creatingOffscreen;
+    creatingOffscreen = null;
+  }
+}
 
 async function performOperation(type, params) {
   let results = await browser.storage.local.get('private_key')
@@ -241,27 +267,43 @@ async function performOperation(type, params) {
         console.log('Performing tipBCH to', recipientNpub, 'amount', amountSat, 'notify', notify);
         const nsec = nip19.nsecEncode(hexToBytes(sk));
         const senderNpub = nip19.npubEncode(getPublicKey(sk));
-
-        // Lazy-create worker if needed
-        if (!tipWorker) {
-          tipWorker = new Worker(browser.runtime.getURL('tip-worker.js'));
-        }
-
-        // Send to worker and await response
+      
+        // Ensure offscreen document is created
+        await setupOffscreenDocument();
+      
+        // Send message to offscreen and await response
         return new Promise((resolve, reject) => {
-          const channel = new MessageChannel();
-          channel.port1.onmessage = (event) => {
-            const result = event.data;
-            if (result.error) {
-              reject(new Error(result.error));
-            } else {
-              resolve(result);
+          chrome.runtime.sendMessage({ action: 'sendTip', params: { senderNpub, nsec, recipientNpub, amountSat } }, async (response) => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(chrome.runtime.lastError.message));
+              return;
             }
-            // Optional: terminate worker after use
-            tipWorker.terminate();
-            tipWorker = null;
-          };
-          tipWorker.postMessage({ action: 'sendTip', params: { senderNpub, nsec, recipientNpub, amountSat, notify } }, [channel.port2]);
+            if (response.error) {
+              reject(new Error(response.error));
+            } else {
+              const { txid } = response;
+              if (notify) {
+                try {
+                  const recipientPk = nip19.decode(recipientNpub).data;
+                  const content = `Received ${amountSat} sat BCH tip! Tx: https://blockchair.com/bitcoin-cash/transaction/${txid}\n\nInstall nos2bch to claim: https://chromewebstore.google.com/detail/nos2bch/bcfefkeannbfenlcnepdnjagpodlnfda`;
+                  const encrypted = await nip04.encrypt(sk, recipientPk, content);
+                  const dmEvent = finalizeEvent({
+                    kind: 4,
+                    created_at: Math.floor(Date.now() / 1000),
+                    tags: [['p', recipientPk]],
+                    content: encrypted,
+                  }, sk);
+                  // Publish to relays (fire-and-forget)
+                  defaultRelays.forEach(relay => publishToRelay(relay, dmEvent).catch(console.warn));
+                } catch (notifyErr) {
+                  console.warn('Notify failed:', notifyErr);
+                }
+              }
+              resolve({ txid });
+            }
+            // Close offscreen document after use to free resources
+            chrome.offscreen.closeDocument().catch(err => console.warn('Failed to close offscreen:', err));
+          });
         });
       }
     }
@@ -270,15 +312,30 @@ async function performOperation(type, params) {
     return {error: {message: error.message, stack: error.stack}}
   }
 }
+async function publishToRelay(relay, event) {
+  return new Promise((res, rej) => {
+    const ws = new WebSocket(relay);
+    const timeout = setTimeout(() => { ws.close(); rej('timeout'); }, 5000);
+    ws.onopen = () => ws.send(JSON.stringify(['EVENT', event]));
+    ws.onmessage = (msg) => {
+      const data = JSON.parse(msg.data);
+      if (data[0] === 'OK' && data[1] === event.id) {
+        clearTimeout(timeout);
+        ws.close();
+        res();
+      }
+    };
+    ws.onerror = (err) => { clearTimeout(timeout); ws.close(); rej(err); };
+    ws.onclose = () => rej('closed');
+  });
+}
 async function handlePromptMessage({host, type, accept, conditions}, sender) {
   openPrompt?.resolve?.({accept, conditions})
   openPrompt = null
   releasePromptMutex()
   if (sender) {
     if (sender.tab && sender.tab.windowId) {
-      browser.windows.remove(sender.tab.windowId).catch(() => {
-        // Ignore if window already closed
-      });
+      browser.windows.remove(sender.tab.windowId).catch(() => {});
     }
   }
 }
