@@ -329,3 +329,33 @@ function addressToScripthash(address) {
   // Reverse the hash for scripthash
   return Array.from(hashed.reverse()).map(b => b.toString(16).padStart(2, '0')).join('');
 }
+
+export function satsToBch(satoshis) {
+  return Number(satoshis) / 100000000;
+}
+
+export function getBalanceFromUtxos(utxos) {
+  return utxos.reduce((sum, utxo) => sum + utxo.value, 0);
+}
+
+export function validateUtxos(utxos) {
+  return utxos.filter(utxo => !utxo.token);  // Non-token only for tips
+}
+
+function concatBytes(...arrays) {
+  let total = 0;
+  for (let arr of arrays) total += arr.length;
+  let result = new Uint8Array(total);
+  let pos = 0;
+  for (let arr of arrays) {
+    result.set(arr, pos);
+    pos += arr.length;
+  }
+  return result;
+}
+
+function reverseBytes(bytes) {
+  const rev = new Uint8Array(bytes.length);
+  for (let i = 0; i < bytes.length; i++) rev[i] = bytes[bytes.length - 1 - i];
+  return rev;
+}

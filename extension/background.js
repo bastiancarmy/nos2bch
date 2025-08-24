@@ -14,11 +14,12 @@ import {
   getUtxos,
   broadcastTx
 } from './common'
-import * as secp from '@noble/secp256k1'
-import { hmac } from '@noble/hashes/hmac'
-import { sha256 } from '@noble/hashes/sha256'
-import { ripemd160 } from '@noble/hashes/ripemd160'
-import { hexToBytes } from '@noble/hashes/utils';
+import * as secp from '@noble/secp256k1'  // Keep for signing
+import { hmac } from '@noble/hashes/hmac'  // Unused in tipping; keep if needed elsewhere
+import { sha256 } from '@noble/hashes/sha256'  // For hash256 as sha256(sha256(x))
+import { ripemd160 } from '@noble/hashes/ripemd160'  // For _hash160
+import { hexToBytes, bytesToHex } from '@noble/hashes/utils';  // For bin/hex conversions
+import { walletTemplateToCompilerBCH, SigningSerializationFlag, generateSigningSerializationBCH, generateTransaction, encodeTransaction, decodeTransaction, importWalletTemplate, walletTemplateP2pkhNonHd } from '@bitauth/libauth';
 
 console.log('Background script starting to load...');
 // Enable sync methods in secp
@@ -188,7 +189,7 @@ async function handleContentScriptMessage({type, params, host}) {
       } catch (err) {
         releasePromptMutex()
         return {
-          error: {message: err.message, stack: err.stack}
+          error: err.message  // String only
         }
       }
     }
@@ -196,41 +197,10 @@ async function handleContentScriptMessage({type, params, host}) {
   }
 }
 
-// Worker instance (lazy-loaded)
-// let tipWorker = null;
-
-// Global to track offscreen creation promise
-let creatingOffscreen = null;
-
-// Function to ensure offscreen document exists
-async function setupOffscreenDocument() {
-  const offscreenUrl = chrome.runtime.getURL('offscreen.html');
-  // Check for existing offscreen document (Chrome 116+)
-  const existingContexts = await chrome.runtime.getContexts({
-    contextTypes: ['OFFSCREEN_DOCUMENT'],
-    documentUrls: [offscreenUrl]
-  });
-  if (existingContexts.length > 0) {
-    return;
-  }
-  // Avoid concurrency issues
-  if (creatingOffscreen) {
-    await creatingOffscreen;
-  } else {
-    creatingOffscreen = chrome.offscreen.createDocument({
-      url: 'offscreen.html',
-      reasons: ['WORKERS'],  // Or 'DOM_PARSER' if more fitting; 'WORKERS' for heavy computation
-      justification: 'Offload BCH transaction signing and crypto operations to avoid blocking service worker.'
-    });
-    await creatingOffscreen;
-    creatingOffscreen = null;
-  }
-}
-
 async function performOperation(type, params) {
   let results = await browser.storage.local.get('private_key')
   if (!results || !results.private_key) {
-    return {error: {message: 'no private key found'}}
+    return {error: 'no private key found'}
   }
   let sk = results.private_key
   try {
@@ -242,7 +212,7 @@ async function performOperation(type, params) {
         const event = finalizeEvent(params.event, sk)
         return verifyEvent(event)
           ? event
-          : {error: {message: 'invalid event'}}
+          : {error: 'invalid event'}
       }
       case 'nip04.encrypt': {
         let {peer, plaintext} = params
@@ -265,53 +235,119 @@ async function performOperation(type, params) {
       case 'tipBCH': {
         const { recipientNpub, amountSat, notify = false } = params;
         console.log('Performing tipBCH to', recipientNpub, 'amount', amountSat, 'notify', notify);
-        const nsec = nip19.nsecEncode(hexToBytes(sk));
-        const senderNpub = nip19.npubEncode(getPublicKey(sk));
-      
-        // Ensure offscreen document is created
-        await setupOffscreenDocument();
-      
-        // Send message to offscreen and await response
-        return new Promise((resolve, reject) => {
-          chrome.runtime.sendMessage({ action: 'sendTip', params: { senderNpub, nsec, recipientNpub, amountSat } }, async (response) => {
-            if (chrome.runtime.lastError) {
-              reject(new Error(chrome.runtime.lastError.message));
-              return;
-            }
-            if (response.error) {
-              reject(new Error(response.error));
-            } else {
-              const { txid } = response;
-              if (notify) {
-                try {
-                  const recipientPk = nip19.decode(recipientNpub).data;
-                  const content = `Received ${amountSat} sat BCH tip! Tx: https://blockchair.com/bitcoin-cash/transaction/${txid}\n\nInstall nos2bch to claim: https://chromewebstore.google.com/detail/nos2bch/bcfefkeannbfenlcnepdnjagpodlnfda`;
-                  const encrypted = await nip04.encrypt(sk, recipientPk, content);
-                  const dmEvent = finalizeEvent({
-                    kind: 4,
-                    created_at: Math.floor(Date.now() / 1000),
-                    tags: [['p', recipientPk]],
-                    content: encrypted,
-                  }, sk);
-                  // Publish to relays (fire-and-forget)
-                  defaultRelays.forEach(relay => publishToRelay(relay, dmEvent).catch(console.warn));
-                } catch (notifyErr) {
-                  console.warn('Notify failed:', notifyErr);
-                }
-              }
-              resolve({ txid });
-            }
-            // Close offscreen document after use to free resources
-            chrome.offscreen.closeDocument().catch(err => console.warn('Failed to close offscreen:', err));
-          });
+        const skBytes = hexToBytes(sk);
+        const pubHex = bytesToHex(getPublicKey(skBytes));
+        const pubkeyCompressed = hexToBytes(pubHex);  // Use noble's hexToBytes
+        const senderAddress = deriveBCHAddress(pubHex);
+        const recipientPk = nip19.decode(recipientNpub).data;
+        const recipientAddress = deriveBCHAddress(recipientPk);
+        
+        // Alarm for keep-alive
+        chrome.alarms.create('tipKeepAlive', { periodInMinutes: 1 });
+        chrome.alarms.onAlarm.addListener((alarm) => {
+          if (alarm.name === 'tipKeepAlive') console.log('SW keep-alive during tip');
         });
+        
+        let attempts = 3;
+        while (attempts > 0) {
+          try {
+            // Cache feeRate (check storage; fallback to fetch)
+            let feeRate;
+            const cached = await browser.storage.local.get('cachedFeeRate');
+            if (cached.cachedFeeRate && Date.now() - cached.timestamp < 300000) {  // 5min
+              feeRate = cached.cachedFeeRate;
+            } else {
+              feeRate = await getFeeRate();
+              browser.storage.local.set({ cachedFeeRate: feeRate, timestamp: Date.now() });
+            }
+            
+            const utxos = validateUtxos(await getUtxos(senderAddress));  // Validate
+            const inputSum = getBalanceFromUtxos(utxos);  // From utils
+            if (inputSum < amountSat + feeRate * 300) throw new Error('Insufficient funds');
+            
+            // Libauth template
+            const walletTemplate = importWalletTemplate(walletTemplateP2pkhNonHd);
+            if (typeof walletTemplate === "string") throw new Error("Template error: " + walletTemplate);
+            const compiler = walletTemplateToCompilerBch(walletTemplate);
+            
+            // Inputs/outputs (adapt to libauth)
+            const inputs = utxos.slice(0, Math.min(utxos.length, 10));  // Limit for speed; batch if more
+            const sourceOutputs = inputs.map(input => ({
+              lockingBytecode: hexToBytes(addressToScriptPubKey(senderAddress)),  // noble hexToBytes
+              valueSatoshis: BigInt(input.value),
+            }));
+            const outputs = [
+              { lockingBytecode: hexToBytes(addressToScriptPubKey(recipientAddress)), valueSatoshis: BigInt(amountSat) }
+            ];
+            const fee = BigInt((148 * inputs.length + 34 * (outputs.length + 1) + 10) * feeRate);
+            let change = BigInt(inputSum) - BigInt(amountSat) - fee;
+            if (change > 546n) {
+              outputs.push({ lockingBytecode: hexToBytes(addressToScriptPubKey(senderAddress)), valueSatoshis: change });
+            }
+            
+            // Unsigned tx
+            const unsignedTx = {
+              version: 2,
+              inputs: inputs.map((input, index) => ({
+                outpointTransactionHash: reverseBytes(hexToBytes(input.txid)),
+                outpointIndex: input.vout,
+                sequenceNumber: 0,
+                unlockingBytecode: { script: 'unlock' },  // Placeholder
+              })),
+              outputs: outputs.map(out => ({
+                lockingBytecode: out.lockingBytecode,
+                valueSatoshis: out.valueSatoshis,
+              })),
+              locktime: 0,
+            };
+            
+            // Sign (adapted, with yields)
+            for (const [index, input] of unsignedTx.inputs.entries()) {
+              const correspondingSourceOutput = sourceOutputs[index];
+              const hashType = SigningSerializationFlag.allOutputs | SigningSerializationFlag.utxos | SigningSerializationFlag.forkId;
+              const context = { inputIndex: index, sourceOutputs, transaction: unsignedTx };
+              const signingSerializationType = new Uint8Array([hashType]);
+              const coveredBytecode = correspondingSourceOutput.lockingBytecode;
+              const sighashPreimage = generateSigningSerializationBch(context, { coveredBytecode, signingSerializationType });
+              const sighash = sha256(sha256(sighashPreimage));  // Use noble sha256 composed for hash256
+              const signature = secp.sign(sighash, skBytes, { lowS: true });  // noble secp; async if needed, but sync is fine
+              if (typeof signature === "string") throw new Error("Sign error: " + signature);
+              const sig = Uint8Array.from([...signature, hashType]);
+              
+              // Unlock (adapt placeholders)
+              input.unlockingBytecode = new Uint8Array([...sig, ...pubkeyCompressed]);
+              await new Promise(r => setTimeout(r, 0));  // Yield
+            }
+            
+            // Generate/encode
+            const generated = generateTransaction(unsignedTx);
+            if (!generated.success) throw new Error(JSON.stringify(generated.errors));
+            const encodedTx = encodeTransaction(generated.transaction);
+            const txHex = bytesToHex(encodedTx);  // noble bytesToHex
+            const txid = await broadcastTx(txHex);
+            
+            // Notify...
+            chrome.alarms.clear('tipKeepAlive');
+            return { txid };
+          } catch (error) {
+            console.error('Tip attempt failed:', error);
+            attempts--;
+            if (attempts > 0) await new Promise(r => setTimeout(r, 2000));
+            else {
+              chrome.alarms.clear('tipKeepAlive');
+              throw error;
+            }
+          }
+        }
       }
     }
   } catch (error) {
+    chrome.alarms.clear('tipKeepAlive');
     console.error('Operation error:', error)
-    return {error: {message: error.message, stack: error.stack}}
+    return {error: error.message}
   }
 }
+
 async function publishToRelay(relay, event) {
   return new Promise((res, rej) => {
     const ws = new WebSocket(relay);

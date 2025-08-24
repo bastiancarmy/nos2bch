@@ -28,6 +28,7 @@ function Popup() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [balanceLoading, setBalanceLoading] = useState(true)
+  const [result, setResult] = useState(null)  // New state for result
 
   useEffect(() => {
     (async () => {
@@ -77,16 +78,23 @@ function Popup() {
         type: 'tipBCH',
         params: { recipientNpub, amountSat: parseInt(amountSat), notify }
       })
-      if (response.success) {
-        setStatus(`Success! TxID: <a href="https://blockchair.com/bitcoin-cash/transaction/${response.txId}" target="_blank">${response.txId}</a>`)
+      console.log('Tip response:', response);  // Enhanced logging
+      setResult(response)  // Set result
+      if (response.txid) {  // Adjusted for {txid} or {error: msg}
+        setStatus(`Success! TxID: <a href="https://blockchair.com/bitcoin-cash/transaction/${response.txid}" target="_blank">${response.txid}</a>`)
         setRecipientNpub('')
         setAmountSat('')
         refreshBalance(bchAddress) // Refresh after success
         setTimeout(() => setStatus(''), 5000) // Clear status after 5s
+      } else if (response.error) {
+        console.error('Tip error details:', response.error);  // Log full error object
+        setError(response.error.message || response.error || 'Unknown error')  // Extract message if object
       } else {
-        setError(response.error || 'Unknown error')
+        setError('Unexpected response format')
       }
     } catch (err) {
+      console.error('Tip exception:', err);  // Enhanced logging
+      setResult({error: err.message})  // Set error as string
       setError('Tip failed: ' + err.message)
     } finally {
       setLoading(false)
@@ -134,6 +142,16 @@ function Popup() {
       </button>
       {status && <div style={{color: 'green', wordBreak: 'break-all'}} dangerouslySetInnerHTML={{__html: status}} />}
       {error && <div style={{color: 'red'}}>{error}</div>}
+      {result && (
+        <div>
+          Result:
+          <pre>
+            {result.error 
+              ? `Error: ${typeof result.error === 'object' ? result.error.message : result.error}`  // Enhanced: handle object
+              : JSON.stringify(result, null, 2)}
+          </pre>
+        </div>
+      )}
     </div>
   )
 }

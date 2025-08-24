@@ -1,11 +1,12 @@
-// Fixed build.mjs: Externalized @bitauth/libauth to avoid top-level await bundle error; no watch
+// Updated build.mjs: Use context for watch mode; bundle libauth; external only Node builtins
 import esbuild from 'esbuild';
 import copy from 'esbuild-plugin-copy';
 import { sassPlugin } from 'esbuild-sass-plugin';
 
 const isProd = process.argv[2] === 'prod';
+const isWatch = process.argv[3] === 'watch';
 
-esbuild.build({
+const config = {
   entryPoints: [
     'extension/background.js',
     'extension/content-script.js',
@@ -35,7 +36,7 @@ esbuild.build({
   define: {
     'process.env.NODE_ENV': isProd ? '"production"' : '"development"',
   },
-  external: ['child_process', 'fs', 'path', 'crypto', 'events', '@bitauth/libauth'],
+  external: ['child_process', 'fs', 'path', 'crypto', 'events'],  // Only Node builtins; bundle libauth/noble
   platform: 'browser',
   format: 'esm',
   target: 'es2022',
@@ -43,4 +44,16 @@ esbuild.build({
   sourcemap: !isProd,
   treeShaking: true,
   metafile: true,
-}).catch(() => process.exit(1));
+};
+
+async function main() {
+  if (isWatch) {
+    const ctx = await esbuild.context(config);
+    await ctx.watch();
+    console.log('Watching for changes...');
+  } else {
+    await esbuild.build(config);
+  }
+}
+
+main().catch(() => process.exit(1));
