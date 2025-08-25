@@ -1,11 +1,9 @@
-// extension/common.js
 import browser from 'webextension-polyfill'
 import * as secp from '@noble/secp256k1'
 import { sha256 } from '@noble/hashes/sha256'
 import { ripemd160 } from '@noble/hashes/ripemd160'
-import { hexToBytes } from '@noble/hashes/utils'
-import { encode as cashEncode, decode as cashDecode } from 'cashaddrjs' // Keep if needed elsewhere, but not for derive
 import { ElectrumClient } from '@electrum-cash/network'
+import { hexToBytes, bytesToHex } from '@noble/hashes/utils'
 
 const ELECTRUM_SERVERS = [
   { host: 'electrum.imaginary.cash', port: 50002, protocol: 'ssl' },
@@ -195,24 +193,8 @@ export function _encodeDer(r, s) {
   return new Uint8Array([0x30, totalLen, ...rEnc, ...sEnc]);
 }
 
-export async function _buildP2PKHOutput(address) {
-  const libauth = await import('@bitauth/libauth');
-  const { cashAddressToLockingBytecode } = libauth;
-  const result = cashAddressToLockingBytecode(address);
-  if (typeof result === 'string') throw new Error(result);
-  return result.bytecode;
-}
-
-export async function getCashAddress(publicKey) {  // Alias for deriveBCHAddress, but takes pub bytes
-  const libauth = await import('@bitauth/libauth');
-  const { publicKeyToP2pkhCashAddress } = libauth;
-  const result = publicKeyToP2pkhCashAddress({ publicKey });
-  if (typeof result === 'string') return result;
-  throw new Error('Invalid public key for address derivation');
-}
-
-// Update getBCHBalance to optionally return sats (for consistency with worker)
 export async function getBCHBalance(address, inSats = false) {
+  address = address.toLowerCase();
   const client = await connectElectrum();
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -229,24 +211,8 @@ export async function getBCHBalance(address, inSats = false) {
   }
 }
 
-export function deriveBCHAddress(pubHex) {
-  let compressedPub
-  try {
-    const temp = hexToBytes('02' + pubHex);
-    secp.Point.fromHex(temp); // Validate
-    compressedPub = temp;
-  } catch {
-    const temp = hexToBytes('03' + pubHex);
-    secp.Point.fromHex(temp);
-    compressedPub = temp;
-  }
-  const pkh = ripemd160(sha256(compressedPub));
-  const prefix = 'bitcoincash';
-  const type = 'P2PKH';
-  return cashEncode(prefix, type, pkh);
-}
-
 export async function getTxHistory(address) {
+  address = address.toLowerCase();
   const client = await connectElectrum();
   try {
     const history = await client.request('blockchain.scripthash.get_history', addressToScripthash(address));
@@ -286,6 +252,7 @@ export async function getFeeRate() {
 }
 
 export async function getUtxos(address) {
+  address = address.toLowerCase();
   const client = await connectElectrum();
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -294,7 +261,9 @@ export async function getUtxos(address) {
         txid: utxo.tx_hash,
         vout: utxo.tx_pos,
         value: utxo.value,
-        scriptPubKey: utxo.script_pubkey  // If needed for signing
+        height: utxo.height, // Always present; 0 if unconfirmed/mempool
+        token_data: utxo.token_data, // Optional; undefined if no CashTokens
+        scriptPubKey: utxo.script_pubkey // If needed for signing (keep if used elsewhere)
       }));
     } catch (err) {
       console.error(`Electrum UTXO fetch attempt ${attempt} failed:`, err);
@@ -323,15 +292,138 @@ export async function broadcastTx(rawTx) {
 }
 
 function addressToScripthash(address) {
-  const { prefix, type, hash } = cashDecode(address);
-  const script = new Uint8Array([0x76, 0xa9, hash.byteLength, ...hash, 0x88, 0xac]);
+  const [hrp, data5] = cashDecode(address);
+  if (!hrp || hrp !== 'bitcoincash') throw new Error('Invalid CashAddr prefix');
+  const payload = convertbits(data5, 5, 8, false);
+  if (!payload || payload.length < 21) throw new Error('Invalid CashAddr payload');
+  const version = payload[0];
+  if (version !== 0) throw new Error('Only P2PKH (version 0) supported');
+  const hash = new Uint8Array(payload.slice(1)); // PKH (20 bytes)
+  if (hash.length !== 20) throw new Error('Invalid PKH length');
+  const script = new Uint8Array([0x76, 0xa9, 0x14, ...hash, 0x88, 0xac]);
   const hashed = sha256(script);
-  // Reverse the hash for scripthash
-  return Array.from(hashed.reverse()).map(b => b.toString(16).padStart(2, '0')).join('');
+  const reversed = reverseBytes(hashed);
+  return Array.from(reversed).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-export function satsToBch(satoshis) {
-  return Number(satoshis) / 100000000;
+// Supporting CashAddr functions (pure JS, no deps beyond noble)
+const CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+
+function cashHrpExpand(hrp) {
+  const expanded = [];
+  for (let char of hrp) {
+    expanded.push(char.charCodeAt(0) & 31);
+  }
+  expanded.push(0);
+  return expanded;
+}
+
+function polymod(values) {
+  const GEN = [0x98f2bc8e61n, 0x79b76d99e2n, 0xf33e5fb3c4n, 0xae2eabe2a8n, 0x1e4f43e470n];
+  let chk = 1n;
+  for (let v of values) {
+    const top = chk >> 35n;
+    chk = ((chk & 0x07ffffffffn) << 5n) ^ BigInt(v);
+    for (let i = 0; i < 5; i++) {
+      if ((top >> BigInt(i)) & 1n) chk ^= GEN[i];
+    }
+  }
+  return chk ^ 1n;
+}
+
+function cashCreateChecksum(hrp, data) {
+  const values = cashHrpExpand(hrp).concat(data);
+  const mod = polymod(values.concat(new Array(8).fill(0)));
+  const checksum = [];
+  for (let i = 0; i < 8; i++) {
+    checksum.push(Number((mod >> (5n * (7n - BigInt(i)))) & 31n));
+  }
+  return checksum;
+}
+
+function cashVerifyChecksum(hrp, data) {
+  return polymod(cashHrpExpand(hrp).concat(data)) === 0n;
+}
+
+function cashDecode(addr) {
+  if (addr.toLowerCase() !== addr && addr.toUpperCase() !== addr) throw new Error('Mixed case CashAddr');
+  addr = addr.toLowerCase();
+  const parts = addr.split(':');
+  const hrp = parts[0];
+  const encoded = parts[1] || addr; // Handle prefixless
+  const data = [];
+  for (let char of encoded) {
+    const d = CHARSET.indexOf(char);
+    if (d === -1) throw new Error('Invalid character in CashAddr');
+    data.push(d);
+  }
+  if (!cashVerifyChecksum(hrp, data)) throw new Error('Invalid CashAddr checksum');
+  return [hrp, data.slice(0, -8)]; // Return hrp and data without checksum
+}
+
+function convertbits(data, frombits, tobits, pad = true) {
+  let acc = 0n;
+  let bits = 0;
+  const ret = [];
+  const maxv = (1n << BigInt(tobits)) - 1n;
+  const max_acc = (1n << BigInt(frombits + tobits - 1)) - 1n;
+
+  for (let value of data) {
+    value = BigInt(value);
+    if (value < 0n || (value >> BigInt(frombits)) !== 0n) {
+      throw new Error('Invalid value in convertbits');
+    }
+    acc = ((acc << BigInt(frombits)) | value) & max_acc;
+    bits += frombits;
+    while (bits >= tobits) {
+      bits -= tobits;
+      ret.push(Number((acc >> BigInt(bits)) & maxv));
+    }
+  }
+
+  if (pad) {
+    if (bits > 0) {
+      ret.push(Number((acc << BigInt(tobits - bits)) & maxv));
+    }
+  } else if (bits >= frombits || ((acc << BigInt(tobits - bits)) & maxv) !== 0n) {
+    throw new Error('Invalid padding in convertbits');
+  }
+
+  return new Uint8Array(ret);
+}
+
+function encodeCashAddr(prefix, type, payload) {
+  const charset = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l';
+  const version = (type << 3) | 0; // P2PKH type 0, size 0 (20 bytes)
+  const converted = convertbits(new Uint8Array([version, ...payload]), 8, 5);
+  
+  const prefixData = [];
+  for (let char of prefix) prefixData.push(char.charCodeAt(0) & 0x1f);
+  const checksumData = new Uint8Array([...prefixData, 0, ...converted, 0, 0, 0, 0, 0, 0, 0, 0]);
+  
+  const checksum = polymod(checksumData);
+  const checksumBytes = [];
+  for (let i = 0; i < 8; i++) {
+    checksumBytes.push(Number((checksum >> (BigInt(5) * BigInt(7 - i))) & 0x1fn));
+  }
+  
+  let encoded = prefix + ':';
+  for (let byte of converted) encoded += charset[byte];
+  for (let byte of checksumBytes) encoded += charset[byte];
+  
+  return encoded;
+}
+
+export function deriveBCHAddress(pubHex) {
+  let pubCompressed = new Uint8Array([0x02, ...hexToBytes(pubHex)]);
+  try {
+    secp.Point.fromHex(pubCompressed); // Even parity
+  } catch {
+    pubCompressed = new Uint8Array([0x03, ...hexToBytes(pubHex)]); // Odd parity
+    secp.Point.fromHex(pubCompressed);
+  }
+  const h = _hash160(pubCompressed);
+  return encodeCashAddr('bitcoincash', 0, h);
 }
 
 export function getBalanceFromUtxos(utxos) {
@@ -339,19 +431,14 @@ export function getBalanceFromUtxos(utxos) {
 }
 
 export function validateUtxos(utxos) {
-  return utxos.filter(utxo => !utxo.token);  // Non-token only for tips
-}
-
-function concatBytes(...arrays) {
-  let total = 0;
-  for (let arr of arrays) total += arr.length;
-  let result = new Uint8Array(total);
-  let pos = 0;
-  for (let arr of arrays) {
-    result.set(arr, pos);
-    pos += arr.length;
-  }
-  return result;
+  console.log('Validating UTXOs - Raw input:', JSON.stringify(utxos, null, 2)); // Log before filter
+  const filtered = utxos.filter(utxo => {
+    const isValid = utxo.height > 0 && (utxo.token_data == null); // Updated to utxo.token_data == null to handle undefined/null explicitly (covers if API sets null)
+    console.log(`UTXO ${utxo.txid}:${utxo.vout} - height: ${utxo.height}, token_data: ${JSON.stringify(utxo.token_data)}, valid: ${isValid}`);
+    return isValid;
+  });
+  console.log('Filtered valid UTXOs:', JSON.stringify(filtered, null, 2));
+  return filtered;
 }
 
 function reverseBytes(bytes) {

@@ -12,14 +12,16 @@ import {
   getBCHBalance,
   getFeeRate,
   getUtxos,
-  broadcastTx
-} from './common'
-import * as secp from '@noble/secp256k1'  // Keep for signing
-import { hmac } from '@noble/hashes/hmac'  // Unused in tipping; keep if needed elsewhere
-import { sha256 } from '@noble/hashes/sha256'  // For hash256 as sha256(sha256(x))
-import { ripemd160 } from '@noble/hashes/ripemd160'  // For _hash160
-import { hexToBytes, bytesToHex } from '@noble/hashes/utils';  // For bin/hex conversions
-import { walletTemplateToCompilerBCH, SigningSerializationFlag, generateSigningSerializationBCH, generateTransaction, encodeTransaction, decodeTransaction, importWalletTemplate, walletTemplateP2pkhNonHd } from '@bitauth/libauth';
+  broadcastTx,
+  validateUtxos,
+  getBalanceFromUtxos,
+  deriveBCHAddress
+} from './common';
+import * as secp from '@noble/secp256k1'
+import { sha256 } from '@noble/hashes/sha256'
+import { ripemd160 } from '@noble/hashes/ripemd160'
+import { hexToBytes, bytesToHex } from '@noble/hashes/utils'
+import { hmac } from '@noble/hashes/hmac'
 
 console.log('Background script starting to load...');
 // Enable sync methods in secp
@@ -198,135 +200,192 @@ async function handleContentScriptMessage({type, params, host}) {
 }
 
 async function performOperation(type, params) {
-  let results = await browser.storage.local.get('private_key')
+  let results = await browser.storage.local.get('private_key');
   if (!results || !results.private_key) {
-    return {error: 'no private key found'}
+    return { error: 'no private key found' };
   }
-  let sk = results.private_key
+  let sk = results.private_key;
   try {
     switch (type) {
       case 'getPublicKey': {
-        return getPublicKey(sk)
+        return getPublicKey(sk);
       }
       case 'signEvent': {
-        const event = finalizeEvent(params.event, sk)
-        return verifyEvent(event)
-          ? event
-          : {error: 'invalid event'}
+        const event = finalizeEvent(params.event, sk);
+        return verifyEvent(event) ? event : { error: 'invalid event' };
       }
       case 'nip04.encrypt': {
-        let {peer, plaintext} = params
-        return nip04.encrypt(sk, peer, plaintext)
+        let { peer, plaintext } = params;
+        return nip04.encrypt(sk, peer, plaintext);
       }
       case 'nip04.decrypt': {
-        let {peer, ciphertext} = params
-        return nip04.decrypt(sk, peer, ciphertext)
+        let { peer, ciphertext } = params;
+        return nip04.decrypt(sk, peer, ciphertext);
       }
       case 'nip44.encrypt': {
-        const {peer, plaintext} = params
-        const key = getSharedSecret(sk, peer)
-        return nip44.v2.encrypt(plaintext, key)
+        const { peer, plaintext } = params;
+        const key = getSharedSecret(sk, peer);
+        return nip44.v2.encrypt(plaintext, key);
       }
       case 'nip44.decrypt': {
-        const {peer, ciphertext} = params
-        const key = getSharedSecret(sk, peer)
-        return nip44.v2.decrypt(ciphertext, key)
+        const { peer, ciphertext } = params;
+        const key = getSharedSecret(sk, peer);
+        return nip44.v2.decrypt(ciphertext, key);
       }
       case 'tipBCH': {
         const { recipientNpub, amountSat, notify = false } = params;
         console.log('Performing tipBCH to', recipientNpub, 'amount', amountSat, 'notify', notify);
         const skBytes = hexToBytes(sk);
-        const pubHex = bytesToHex(getPublicKey(skBytes));
-        const pubkeyCompressed = hexToBytes(pubHex);  // Use noble's hexToBytes
+        const pubHex = getPublicKey(skBytes); // Already hex string
+        const pubkeyCompressed = new Uint8Array([0x02, ...hexToBytes(pubHex)]);
         const senderAddress = deriveBCHAddress(pubHex);
-        const recipientPk = nip19.decode(recipientNpub).data;
+        const recipientPk = nip19.decode(recipientNpub).data; // Hex string
+        const recipientPubCompressed = new Uint8Array([0x02, ...hexToBytes(recipientPk)]);
         const recipientAddress = deriveBCHAddress(recipientPk);
-        
-        // Alarm for keep-alive
+      
         chrome.alarms.create('tipKeepAlive', { periodInMinutes: 1 });
         chrome.alarms.onAlarm.addListener((alarm) => {
           if (alarm.name === 'tipKeepAlive') console.log('SW keep-alive during tip');
         });
-        
+      
         let attempts = 3;
         while (attempts > 0) {
           try {
-            // Cache feeRate (check storage; fallback to fetch)
             let feeRate;
             const cached = await browser.storage.local.get('cachedFeeRate');
-            if (cached.cachedFeeRate && Date.now() - cached.timestamp < 300000) {  // 5min
+            if (cached.cachedFeeRate && Date.now() - cached.timestamp < 300000) {
               feeRate = cached.cachedFeeRate;
             } else {
               feeRate = await getFeeRate();
               browser.storage.local.set({ cachedFeeRate: feeRate, timestamp: Date.now() });
             }
-            
-            const utxos = validateUtxos(await getUtxos(senderAddress));  // Validate
-            const inputSum = getBalanceFromUtxos(utxos);  // From utils
-            if (inputSum < amountSat + feeRate * 300) throw new Error('Insufficient funds');
-            
-            // Libauth template
-            const walletTemplate = importWalletTemplate(walletTemplateP2pkhNonHd);
-            if (typeof walletTemplate === "string") throw new Error("Template error: " + walletTemplate);
-            const compiler = walletTemplateToCompilerBch(walletTemplate);
-            
-            // Inputs/outputs (adapt to libauth)
-            const inputs = utxos.slice(0, Math.min(utxos.length, 10));  // Limit for speed; batch if more
+      
+            const rawUtxos = await getUtxos(senderAddress.toLowerCase());
+            console.log('Raw fetched UTXOs:', JSON.stringify(rawUtxos, null, 2)); // Log raw UTXOs to inspect height and token_data
+            const utxos = validateUtxos(rawUtxos);
+            console.log('Validated UTXOs:', JSON.stringify(utxos, null, 2)); // Log after filtering to debug why sum might be 0
+            const inputSum = getBalanceFromUtxos(utxos);
+            if (inputSum === 0) throw new Error('No valid UTXOs available (check logs for height/token_data issues)');
+      
+            const inputs = utxos.slice(0, Math.min(utxos.length, 10));
+            const senderLockingBytecode = p2pkhLockingBytecode(pubkeyCompressed);
             const sourceOutputs = inputs.map(input => ({
-              lockingBytecode: hexToBytes(addressToScriptPubKey(senderAddress)),  // noble hexToBytes
+              lockingBytecode: senderLockingBytecode,
               valueSatoshis: BigInt(input.value),
             }));
+      
             const outputs = [
-              { lockingBytecode: hexToBytes(addressToScriptPubKey(recipientAddress)), valueSatoshis: BigInt(amountSat) }
+              { lockingBytecode: p2pkhLockingBytecode(recipientPubCompressed), valueSatoshis: BigInt(amountSat) }
             ];
-            const fee = BigInt((148 * inputs.length + 34 * (outputs.length + 1) + 10) * feeRate);
-            let change = BigInt(inputSum) - BigInt(amountSat) - fee;
-            if (change > 546n) {
-              outputs.push({ lockingBytecode: hexToBytes(addressToScriptPubKey(senderAddress)), valueSatoshis: change });
-            }
-            
-            // Unsigned tx
+      
+            // Improved fee calculation: First assume no change output
+            let baseBytes = 148 * inputs.length + 34 * outputs.length + 10;
+            let baseFee = BigInt(baseBytes * feeRate);
+            let potentialChange = BigInt(inputSum) - BigInt(amountSat) - baseFee;
+      
+            if (potentialChange < 0n) throw new Error('Insufficient funds');
+      
+            let finalFee = baseFee;
+            if (potentialChange > 546n) {
+              // Check if adding change output is viable
+              let bytesWithChange = 148 * inputs.length + 34 * (outputs.length + 1) + 10;
+              let feeWithChange = BigInt(bytesWithChange * feeRate);
+              let actualChange = BigInt(inputSum) - BigInt(amountSat) - feeWithChange;
+      
+              if (actualChange >= 546n) {
+                // Add change output
+                outputs.push({ lockingBytecode: senderLockingBytecode, valueSatoshis: actualChange });
+                finalFee = feeWithChange;
+              } else {
+                // Even with change, it's below dust threshold; proceed without change if possible
+                if (potentialChange < 0n) throw new Error('Insufficient funds');
+                // No change added, stick with baseFee
+              }
+            } // Else: potentialChange <= 546n and >=0n, no change output needed
+      
             const unsignedTx = {
               version: 2,
-              inputs: inputs.map((input, index) => ({
+              inputs: inputs.map(input => ({
                 outpointTransactionHash: reverseBytes(hexToBytes(input.txid)),
                 outpointIndex: input.vout,
                 sequenceNumber: 0,
-                unlockingBytecode: { script: 'unlock' },  // Placeholder
+                unlockingBytecode: new Uint8Array() // Filled later
               })),
-              outputs: outputs.map(out => ({
-                lockingBytecode: out.lockingBytecode,
-                valueSatoshis: out.valueSatoshis,
-              })),
+              outputs,
               locktime: 0,
             };
-            
-            // Sign (adapted, with yields)
+      
+            // Precompute shared sighash parts (outside loop)
+            const hashPrevouts = sha256(sha256(concatBytes(...unsignedTx.inputs.map(inp => concatBytes(inp.outpointTransactionHash, le32(inp.outpointIndex))))));
+            const hashSequence = sha256(sha256(concatBytes(...unsignedTx.inputs.map(inp => le32(inp.sequenceNumber)))));
+            const hashOutputs = sha256(sha256(concatBytes(...unsignedTx.outputs.map(out => concatBytes(le64(out.valueSatoshis), varInt(out.lockingBytecode.length), out.lockingBytecode)))));
+            const versionBytes = le32(unsignedTx.version);
+            const locktimeBytes = le32(unsignedTx.locktime);
+            const sighashTypeBytes = le32(0x41); // SIGHASH_ALL | SIGHASH_FORKID
+      
             for (const [index, input] of unsignedTx.inputs.entries()) {
               const correspondingSourceOutput = sourceOutputs[index];
-              const hashType = SigningSerializationFlag.allOutputs | SigningSerializationFlag.utxos | SigningSerializationFlag.forkId;
-              const context = { inputIndex: index, sourceOutputs, transaction: unsignedTx };
-              const signingSerializationType = new Uint8Array([hashType]);
-              const coveredBytecode = correspondingSourceOutput.lockingBytecode;
-              const sighashPreimage = generateSigningSerializationBch(context, { coveredBytecode, signingSerializationType });
-              const sighash = sha256(sha256(sighashPreimage));  // Use noble sha256 composed for hash256
-              const signature = secp.sign(sighash, skBytes, { lowS: true });  // noble secp; async if needed, but sync is fine
-              if (typeof signature === "string") throw new Error("Sign error: " + signature);
-              const sig = Uint8Array.from([...signature, hashType]);
-              
-              // Unlock (adapt placeholders)
-              input.unlockingBytecode = new Uint8Array([...sig, ...pubkeyCompressed]);
-              await new Promise(r => setTimeout(r, 0));  // Yield
+              const scriptCode = correspondingSourceOutput.lockingBytecode;
+              const outpoint = concatBytes(input.outpointTransactionHash, le32(input.outpointIndex));
+              const value = le64(correspondingSourceOutput.valueSatoshis);
+              const sequence = le32(input.sequenceNumber);
+          
+              const preimage = concatBytes(
+                versionBytes,
+                hashPrevouts,
+                hashSequence,
+                outpoint,
+                varInt(scriptCode.length),
+                scriptCode,
+                value,
+                sequence,
+                hashOutputs,
+                locktimeBytes,
+                sighashTypeBytes
+              );
+              const sighash = sha256(sha256(preimage));
+              const sig = secp.sign(sighash, skBytes, { lowS: true }); // Returns Signature object
+              const r = sig.r; // bigint
+              const s = sig.s; // bigint
+              const der = _encodeDer(r, s);
+              const sigWithType = concatBytes(der, new Uint8Array([0x41]));
+          
+              input.unlockingBytecode = concatBytes(
+                new Uint8Array([sigWithType.length]),
+                sigWithType,
+                new Uint8Array([pubkeyCompressed.length]),
+                pubkeyCompressed
+              );
+      
+              await new Promise(r => setTimeout(r, 0)); // Yield to event loop
             }
-            
-            // Generate/encode
-            const generated = generateTransaction(unsignedTx);
-            if (!generated.success) throw new Error(JSON.stringify(generated.errors));
-            const encodedTx = encodeTransaction(generated.transaction);
-            const txHex = bytesToHex(encodedTx);  // noble bytesToHex
+      
+            const encodedTx = encodeTx(unsignedTx);
+            const txHex = bytesToHex(encodedTx);
             const txid = await broadcastTx(txHex);
-            
-            // Notify...
+      
+            // If notify is true, send a Nostr kind:1 note to the recipient
+            if (notify) {
+              const event = {
+                kind: 1,
+                created_at: Math.floor(Date.now() / 1000),
+                tags: [['p', recipientPk]],
+                content: `Tipped you ${amountSat} sats on Bitcoin Cash! Transaction: https://blockchair.com/bitcoin-cash/transaction/${txid}`
+              };
+              const signed = finalizeEvent(event, skBytes); // Use skBytes directly if finalizeEvent accepts bytes; otherwise convert to hex
+              if (!verifyEvent(signed)) throw new Error('Failed to verify tipped notification event');
+      
+              const relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.mom'];
+              for (const relay of relays) {
+                try {
+                  await publishToRelay(relay, signed);
+                  console.log(`Notification published to ${relay}`);
+                } catch (err) {
+                  console.warn(`Failed to publish to ${relay}:`, err);
+                }
+              }
+            }
+      
             chrome.alarms.clear('tipKeepAlive');
             return { txid };
           } catch (error) {
@@ -343,8 +402,8 @@ async function performOperation(type, params) {
     }
   } catch (error) {
     chrome.alarms.clear('tipKeepAlive');
-    console.error('Operation error:', error)
-    return {error: error.message}
+    console.error('Operation error:', error);
+    return { error: error.message };
   }
 }
 
@@ -387,25 +446,106 @@ async function openSignUpWindow() {
   })
 }
 // --- BCH Helpers ---
-function _hash160 (x) {
-  return ripemd160(sha256(x))
+function _hash160(x) {
+  return ripemd160(sha256(x));
 }
-function _encodeDer (r, s) {
-  function encodeInt (val) {
-    let bytes = []
-    let tmp = val
-    if (tmp === 0n) bytes.push(0)
+
+function _encodeDer(r, s) {
+  function encodeInt(val) {
+    let bytes = [];
+    let tmp = val;
+    if (tmp === 0n) bytes.push(0);
     while (tmp > 0n) {
-      bytes.push(Number(tmp & 0xffn))
-      tmp >>= 8n
+      bytes.push(Number(tmp & 0xffn));
+      tmp >>= 8n;
     }
-    bytes = bytes.reverse()
-    if (bytes[0] & 0x80) bytes.unshift(0)
-    return new Uint8Array([0x02, bytes.length, ...bytes])
+    bytes = bytes.reverse();
+    if (bytes[0] & 0x80) bytes.unshift(0);
+    return new Uint8Array([0x02, bytes.length, ...bytes]);
   }
-  const rEnc = encodeInt(r)
-  const sEnc = encodeInt(s)
-  const totalLen = rEnc.length + sEnc.length
-  return new Uint8Array([0x30, totalLen, ...rEnc, ...sEnc])
+  const rEnc = encodeInt(r);
+  const sEnc = encodeInt(s);
+  const totalLen = rEnc.length + sEnc.length;
+  return new Uint8Array([0x30, totalLen, ...rEnc, ...sEnc]);
 }
+
+function concatBytes(...arrays) {
+  const totalLen = arrays.reduce((sum, a) => sum + a.length, 0);
+  const result = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const arr of arrays) {
+    result.set(arr, offset);
+    offset += arr.length;
+  }
+  return result;
+}
+
+function le32(n) {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n, true);
+  return b;
+}
+
+function le64(n) {
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setBigUint64(0, BigInt(n), true);
+  return b;
+}
+
+function varInt(val) {
+  if (val < 0xfd) return new Uint8Array([val]);
+  if (val <= 0xffff) {
+    const b = new Uint8Array(3);
+    b[0] = 0xfd;
+    new DataView(b.buffer).setUint16(1, val, true);
+    return b;
+  }
+  if (val <= 0xffffffff) {
+    const b = new Uint8Array(5);
+    b[0] = 0xfe;
+    new DataView(b.buffer).setUint32(1, val, true);
+    return b;
+  }
+  const b = new Uint8Array(9);
+  b[0] = 0xff;
+  new DataView(b.buffer).setBigUint64(1, BigInt(val), true);
+  return b;
+}
+
+function reverseBytes(b) {
+  const rev = new Uint8Array(b.length);
+  for (let i = 0; i < b.length; i++) rev[i] = b[b.length - 1 - i];
+  return rev;
+}
+
+function p2pkhLockingBytecode(pubCompressed) {
+  const h = _hash160(pubCompressed);
+  return new Uint8Array([0x76, 0xa9, 0x14, ...h, 0x88, 0xac]);
+}
+
+function encodeTx(tx) {
+  const inpCount = varInt(tx.inputs.length);
+  const outCount = varInt(tx.outputs.length);
+  const inputsSer = tx.inputs.map(inp => concatBytes(
+    inp.outpointTransactionHash,
+    le32(inp.outpointIndex),
+    varInt(inp.unlockingBytecode.length),
+    inp.unlockingBytecode,
+    le32(inp.sequenceNumber)
+  ));
+  const outputsSer = tx.outputs.map(out => concatBytes(
+    le64(out.valueSatoshis),
+    varInt(out.lockingBytecode.length),
+    out.lockingBytecode
+  ));
+  return concatBytes(
+    le32(tx.version),
+    inpCount,
+    ...inputsSer,
+    outCount,
+    ...outputsSer,
+    le32(tx.locktime)
+  );
+}
+
 console.log('Background script loaded successfully');
