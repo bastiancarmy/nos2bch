@@ -240,7 +240,7 @@ async function performOperation(type, params) {
         
         let skBytes = hexToBytes(sk);
         let point = secp.Point.fromPrivateKey(skBytes);
-        if (point.hasOddY()) { // Use hasOddY() for clarity
+        if (!point.hasEvenY()) { // Flip if odd Y
           const n = secp.CURVE.n;
           const skBig = secp.utils.bytesToNumberBE(skBytes);
           const flippedBig = n - skBig;
