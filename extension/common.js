@@ -1,3 +1,5 @@
+// common.js
+
 import browser from 'webextension-polyfill'
 import * as secp from '@noble/secp256k1'
 import { sha256 } from '@noble/hashes/sha256'
@@ -279,12 +281,15 @@ export async function broadcastTx(rawTx) {
   const client = await connectElectrum();
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const txid = await client.request('blockchain.transaction.broadcast', rawTx);
-      return txid;
+      const response = await client.request('blockchain.transaction.broadcast', rawTx);
+      if (typeof response !== 'string' || response.length !== 64 || !/^[0-9a-f]{64}$/i.test(response)) {
+        throw new Error(`Invalid broadcast response: ${JSON.stringify(response)}`);
+      }
+      console.log(`Broadcast successful, txid: ${response}`);
+      return response;
     } catch (err) {
       console.error(`Electrum broadcast attempt ${attempt} failed:`, err);
       if (attempt === 3) {
-        console.error('Electrum broadcast failed after retries:', err);
         throw err;
       }
     }
@@ -445,4 +450,63 @@ function reverseBytes(bytes) {
   const rev = new Uint8Array(bytes.length);
   for (let i = 0; i < bytes.length; i++) rev[i] = bytes[bytes.length - 1 - i];
   return rev;
+}
+
+//schnorr support
+export function utf8ToBytes(str) {
+  return new TextEncoder().encode(str);
+}
+
+export function rfc6979K(privBytes, h1) {
+  const n = secp.CURVE.n;
+  let k = new Uint8Array(32).fill(0);
+  let v = new Uint8Array(32).fill(1);
+  k = secp.etc.hmacSha256Sync(k, secp.etc.concatBytes(v, new Uint8Array([0x00]), privBytes, h1));
+  v = secp.etc.hmacSha256Sync(k, v);
+  k = secp.etc.hmacSha256Sync(k, secp.etc.concatBytes(v, new Uint8Array([0x01]), privBytes, h1));
+  v = secp.etc.hmacSha256Sync(k, v);
+  let attempts = 0;
+  while (attempts < 10000) {
+    v = secp.etc.hmacSha256Sync(k, v);
+    const candidate = secp.utils.bytesToNumberBE(v);
+    if (candidate >= 1n && candidate < n) return candidate;
+    k = secp.etc.hmacSha256Sync(k, secp.etc.concatBytes(v, new Uint8Array([0x00])));
+    v = secp.etc.hmacSha256Sync(k, v);
+    attempts++;
+  }
+  throw new Error('Failed to generate deterministic k after max attempts');
+}
+
+export function modPow(base, exp, mod) {
+  let res = 1n;
+  base = base % mod;
+  while (exp > 0n) {
+    if (exp % 2n === 1n) res = (res * base) % mod;
+    base = (base * base) % mod;
+    exp /= 2n;
+  }
+  return res;
+}
+
+export function signSchnorr(sighash, privBytes) {
+  const P = secp.CURVE.p;
+  const n = secp.CURVE.n;
+  const h1 = sha256(secp.etc.concatBytes(utf8ToBytes('Schnorr+SHA256'), sighash)); // BCH-spec prefix to avoid ECDSA conflict
+  const k = rfc6979K(privBytes, h1);
+  let R = secp.Point.fromPrivateKey(k);
+  const y = R.y;
+  let kBig = k;
+  if (y % 2n === 1n) { // If y odd, flip
+    kBig = (n - k) % n;
+    R = R.negate();
+  }
+  const rBig = R.x;
+  const rBytes = secp.utils.numberToBytesBE(rBig, 32);
+  const pubBytes = secp.getPublicKey(privBytes);
+  const shaSighash = sha256(sighash); // SHA256(M) where M = sighash
+  const eBytes = sha256(secp.etc.concatBytes(rBytes, pubBytes, shaSighash));
+  const e = secp.utils.bytesToNumberBE(eBytes) % n;
+  const sBig = (kBig + e * secp.utils.bytesToNumberBE(privBytes)) % n;
+  const sBytes = secp.utils.numberToBytesBE(sBig, 32);
+  return secp.etc.concatBytes(rBytes, sBytes); // 64-byte sig
 }

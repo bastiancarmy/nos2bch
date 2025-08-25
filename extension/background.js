@@ -1,3 +1,5 @@
+// background.js
+
 import browser from 'webextension-polyfill'
 import {getPublicKey, finalizeEvent, verifyEvent} from 'nostr-tools/pure'
 import {nip04, nip19} from 'nostr-tools'
@@ -235,12 +237,25 @@ async function performOperation(type, params) {
       case 'tipBCH': {
         const { recipientNpub, amountSat, notify = false } = params;
         console.log('Performing tipBCH to', recipientNpub, 'amount', amountSat, 'notify', notify);
-        const skBytes = hexToBytes(sk);
-        const pubHex = getPublicKey(skBytes); // Already hex string
-        const pubkeyCompressed = new Uint8Array([0x02, ...hexToBytes(pubHex)]);
+        
+        let skBytes = hexToBytes(sk);
+        let point = secp.Point.fromPrivateKey(skBytes);
+        if (point.hasOddY()) { // Use hasOddY() for clarity
+          const n = secp.CURVE.n;
+          const skBig = secp.utils.bytesToNumberBE(skBytes);
+          const flippedBig = n - skBig;
+          skBytes = secp.utils.numberToBytesBE(flippedBig, 32);
+          point = secp.Point.fromPrivateKey(skBytes);
+          console.log('Normalized skBytes to ensure even y-parity for consistency with Nostr');
+        }
+        
+        const pubHex = bytesToHex(point.toRawX());
+        const pubCompressed = secp.getPublicKey(skBytes); // Always even y prefix (02/03 correct)
         const senderAddress = deriveBCHAddress(pubHex);
-        const recipientPk = nip19.decode(recipientNpub).data; // Hex string
-        const recipientPubCompressed = new Uint8Array([0x02, ...hexToBytes(recipientPk)]);
+        
+        const recipientPk = nip19.decode(recipientNpub).data;
+        const recipientPoint = secp.Point.fromHex(recipientPk);
+        const recipientPubCompressed = secp.getPublicKey(hexToBytes(recipientPk)); // Noble handles prefix
         const recipientAddress = deriveBCHAddress(recipientPk);
       
         chrome.alarms.create('tipKeepAlive', { periodInMinutes: 1 });
@@ -268,7 +283,7 @@ async function performOperation(type, params) {
             if (inputSum === 0) throw new Error('No valid UTXOs available (check logs for height/token_data issues)');
       
             const inputs = utxos.slice(0, Math.min(utxos.length, 10));
-            const senderLockingBytecode = p2pkhLockingBytecode(pubkeyCompressed);
+            const senderLockingBytecode = p2pkhLockingBytecode(pubCompressed);
             const sourceOutputs = inputs.map(input => ({
               lockingBytecode: senderLockingBytecode,
               valueSatoshis: BigInt(input.value),
@@ -341,20 +356,16 @@ async function performOperation(type, params) {
                 sequence,
                 hashOutputs,
                 locktimeBytes,
-                sighashTypeBytes
+                sighashTypeBytes // 0x41
               );
               const sighash = sha256(sha256(preimage));
-              const sig = secp.sign(sighash, skBytes, { lowS: true }); // Returns Signature object
-              const r = sig.r; // bigint
-              const s = sig.s; // bigint
-              const der = _encodeDer(r, s);
-              const sigWithType = concatBytes(der, new Uint8Array([0x41]));
-          
+              const sig = signSchnorr(sighash, skBytes); // 64-byte Schnorr sig
+              
               input.unlockingBytecode = concatBytes(
-                new Uint8Array([sigWithType.length]),
-                sigWithType,
-                new Uint8Array([pubkeyCompressed.length]),
-                pubkeyCompressed
+                new Uint8Array([sig.length]),
+                sig,
+                new Uint8Array([pubCompressed.length]),
+                pubCompressed
               );
       
               await new Promise(r => setTimeout(r, 0)); // Yield to event loop
@@ -362,6 +373,7 @@ async function performOperation(type, params) {
       
             const encodedTx = encodeTx(unsignedTx);
             const txHex = bytesToHex(encodedTx);
+            console.log('Built txHex for broadcast:', txHex);
             const txid = await broadcastTx(txHex);
       
             // If notify is true, send a Nostr kind:1 note to the recipient
@@ -372,7 +384,7 @@ async function performOperation(type, params) {
                 tags: [['p', recipientPk]],
                 content: `Tipped you ${amountSat} sats on Bitcoin Cash! Transaction: https://blockchair.com/bitcoin-cash/transaction/${txid}`
               };
-              const signed = finalizeEvent(event, skBytes); // Use skBytes directly if finalizeEvent accepts bytes; otherwise convert to hex
+              const signed = finalizeEvent(event, skBytes); // Assumes finalizeEvent accepts bytes; if not, use bytesToHex(skBytes)
               if (!verifyEvent(signed)) throw new Error('Failed to verify tipped notification event');
       
               const relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.mom'];
