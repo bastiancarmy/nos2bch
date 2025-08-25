@@ -495,7 +495,7 @@ export function signSchnorr(sighash, privBytes) {
   const k = rfc6979K(privBytes, h1);
   let R = secp.Point.fromPrivateKey(k);
   let kBig = k;
-  if (!R.hasEvenY()) { // If y odd, flip
+  if (R.toAffine().y % 2n === 1n) { // If y odd, flip
     kBig = (n - k) % n;
     R = R.negate();
   }
