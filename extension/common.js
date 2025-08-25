@@ -494,17 +494,15 @@ export function signSchnorr(sighash, privBytes) {
   const h1 = sha256(secp.etc.concatBytes(utf8ToBytes('Schnorr+SHA256'), sighash)); // BCH-spec prefix to avoid ECDSA conflict
   const k = rfc6979K(privBytes, h1);
   let R = secp.Point.fromPrivateKey(k);
-  const y = R.y;
   let kBig = k;
-  if (y % 2n === 1n) { // If y odd, flip
+  if (!R.hasEvenY()) { // If y odd, flip
     kBig = (n - k) % n;
     R = R.negate();
   }
   const rBig = R.x;
   const rBytes = secp.utils.numberToBytesBE(rBig, 32);
   const pubBytes = secp.getPublicKey(privBytes);
-  const shaSighash = sha256(sighash); // SHA256(M) where M = sighash
-  const eBytes = sha256(secp.etc.concatBytes(rBytes, pubBytes, shaSighash));
+  const eBytes = sha256(secp.etc.concatBytes(rBytes, pubBytes, sighash));
   const e = secp.utils.bytesToNumberBE(eBytes) % n;
   const sBig = (kBig + e * secp.utils.bytesToNumberBE(privBytes)) % n;
   const sBytes = secp.utils.numberToBytesBE(sBig, 32);
