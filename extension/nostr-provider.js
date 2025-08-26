@@ -1,120 +1,81 @@
-window.nostr = {
-  _requests: {},
-  _pubkey: null,
+// extension/nostr-provider.js
+(function () {
+  if (window.nostr) return
 
-  async getPublicKey() {
-    if (this._pubkey) return this._pubkey
-    this._pubkey = await this._call('getPublicKey', {})
-    return this._pubkey
-  },
+  window.nostr = {
+    _requests: {},
+    _pubkey: null,
 
-  async signEvent(event) {
-    return this._call('signEvent', { event })
-  },
-
-  async getRelays() {
-    return {}
-  },
-
-  nip04: {
-    async encrypt(peer, plaintext) {
-      return window.nostr._call('nip04.encrypt', { peer, plaintext })
+    async getPublicKey() {
+      if (this._pubkey) return this._pubkey
+      this._pubkey = await this._call('getPublicKey', {})
+      return this._pubkey
     },
 
-    async decrypt(peer, ciphertext) {
-      return window.nostr._call('nip04.decrypt', { peer, ciphertext })
-    }
-  },
-
-  nip44: {
-    async encrypt(peer, plaintext) {
-      return window.nostr._call('nip44.encrypt', { peer, plaintext })
+    async signEvent(event) {
+      return this._call('signEvent', { event })
     },
 
-    async decrypt(peer, ciphertext) {
-      return window.nostr._call('nip44.decrypt', { peer, ciphertext })
-    }
-  },
+    async getRelays() {
+      return this._call('getRelays', {})
+    },
 
-  _call(type, params) {
-    const id = Math.random().toString().slice(-4)
-    console.log(
-      '%c[nos2bch:%c' +
-        id +
-        '%c]%c calling %c' +
-        type +
-        '%c with %c' +
-        JSON.stringify(params || {}),
-      'background-color:#f1b912;font-weight:bold;color:white',
-      'background-color:#f1b912;font-weight:bold;color:#a92727',
-      'background-color:#f1b912;color:white;font-weight:bold',
-      'color:auto',
-      'font-weight:bold;color:#08589d;font-family:monospace',
-      'color:auto',
-      'font-weight:bold;color:#90b12d;font-family:monospace'
+    nip04: {
+      async encrypt(peer, plaintext) {
+        return window.nostr._call('nip04.encrypt', { peer, plaintext })
+      },
+      async decrypt(peer, ciphertext) {
+        return window.nostr._call('nip04.decrypt', { peer, ciphertext })
+      }
+    },
+
+    nip44: {
+      async encrypt(peer, plaintext) {
+        return window.nostr._call('nip44.encrypt', { peer, plaintext })
+      },
+      async decrypt(peer, ciphertext) {
+        return window.nostr._call('nip44.decrypt', { peer, ciphertext })
+      }
+    },
+
+    tipBCH: async function(recipientNpub, amountSat) {
+      return await this._call('tipBCH', { recipientNpub, amountSat })
+    },
+
+    _call(type, params) {
+      return new Promise((resolve, reject) => {
+        let id = Math.random().toString().slice(4)
+        this._requests[id] = { resolve, reject }
+        window.postMessage(
+          {
+            id,
+            ext: 'nos2x',
+            type,
+            params
+          },
+          '*'
+        )
+      })
+    }
+  }
+
+  window.addEventListener('message', async event => {
+    if (
+      !event.data ||
+      event.data.ext !== 'nos2x' ||
+      !event.data.response
     )
-    return new Promise((resolve, reject) => {
-      this._requests[id] = { resolve, reject }
-      window.postMessage(
-        {
-          id,
-          ext: 'nos2bch',
-          type,
-          params
-        },
-        '*'
-      )
-    })
-  }
-}
+      return
 
-window.addEventListener('message', message => {
-  if (
-    !message.data ||
-    message.data.response === null ||
-    message.data.response === undefined ||
-    message.data.ext !== 'nos2bch' ||
-    !window.nostr._requests[message.data.id]
-  )
-    return
-
-  if (message.data.response.error) {
-    const error = new Error('nos2bch: ' + message.data.response.error.message)
-    error.stack = message.data.response.error.stack
-    window.nostr._requests[message.data.id].reject(error)
-  } else {
-    window.nostr._requests[message.data.id].resolve(message.data.response)
-  }
-
-  console.log(
-    '%c[nos2bch:%c' +
-      message.data.id +
-      '%c]%c result: %c' +
-      JSON.stringify(
-        message?.data?.response || message?.data?.response?.error?.message || {}
-      ),
-    'background-color:#f1b912;font-weight:bold;color:white',
-    'background-color:#f1b912;font-weight:bold;color:#a92727',
-    'background-color:#f1b912;color:white;font-weight:bold',
-    'color:auto',
-    'font-weight:bold;color:#08589d'
-  )
-
-  delete window.nostr._requests[message.data.id]
-})
-
-// hack to replace nostr:nprofile.../etc links with something else
-let replacing = null
-document.addEventListener('mousedown', replaceNostrSchemeLink)
-async function replaceNostrSchemeLink(e) {
-  if (e.target.tagName !== 'A' || !e.target.href.startsWith('nostr:')) return
-  if (replacing === false) return
-
-  const response = await window.nostr._call('replaceURL', { url: e.target.href })
-  if (response === false) {
-    replacing = false
-    return
-  }
-
-  e.target.href = response
-}
+    if (window.nostr._requests[event.data.id]) {
+      if (event.data.response.error) {
+        let error = new Error('nos2x: ' + event.data.response.error.message)
+        error.stack = event.data.response.error.stack
+        window.nostr._requests[event.data.id].reject(error)
+      } else {
+        window.nostr._requests[event.data.id].resolve(event.data.response)
+      }
+      delete window.nostr._requests[event.data.id]
+    }
+  })
+})()

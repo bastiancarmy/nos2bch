@@ -1,1 +1,96 @@
-body{color:#000;background-color:#fffffff8;font-size:.9em}h2{font-size:1.3em;margin:0 0 20px}.input-button-container{display:flex;align-items:center;justify-content:space-between;gap:10px}.modal{background-color:#fffffff8;width:100%;display:flex;justify-content:center;align-items:center;flex-direction:column}.modal-content{padding:0 20px;width:100%;font-size:1.3rem}form{display:flex;flex-direction:column;width:100%}label{margin-top:20px;font-size:20px;font-weight:700}.text{font-size:16px}.form-control{max-width:-webkit-fill-available;padding:10px;margin:5px 0;border:1px solid #ccc;border-radius:5px;font-size:16px}textarea.form-control{height:90px}.btn{border:none;padding:10px 20px;border-radius:5px;cursor:pointer}
+body {
+  color: #000;
+  background-color: #fffffff8;
+  font-size: .9em;
+}
+
+h2 {
+  font-size: 1.3em;
+  margin: 0 0 20px;
+}
+
+.input-button-container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.modal {
+  background-color: #fffffff8;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-direction: column;
+}
+
+.modal-content {
+  padding: 0 20px;
+  width: 100%;
+  font-size: 1.3rem;
+}
+
+form {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+label {
+  margin-top: 20px;
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.text {
+  font-size: 16px;
+}
+
+.form-control {
+  max-width: -webkit-fill-available;
+  padding: 10px;
+  margin: 5px 0;
+  border: 1px solid #ccc;
+  border-radius: 5px;
+  font-size: 16px;
+}
+
+textarea.form-control {
+  height: 90px;
+}
+
+.btn {
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+/* New: Styles for npub and address wrapping (monospace font, smaller size, break-all for fit in window) */
+.npub,
+.address {
+  font-family: monospace; /* Console-like font */
+  font-size: 0.8em; /* Smaller point size */
+  white-space: pre-wrap; /* Allow wrapping */
+  word-break: break-all; /* Break long words */
+  overflow: hidden; /* Prevent overflow */
+  width: 100%; /* Full width for container fit */
+}
+
+/* New: QR code container and SVG styles for responsiveness (expand to fit window) */
+.qr-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%; /* Full width */
+  height: auto; /* Auto height to maintain aspect */
+  margin: 10px 0; /* Spacing */
+}
+
+.qr-container svg {
+  width: 100%; /* Expand to container width */
+  max-width: 80vw; /* Cap at 80% viewport width for larger windows */
+  height: auto; /* Maintain aspect ratio */
+  min-width: 150px; /* Minimum size for small windows */
+}

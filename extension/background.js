@@ -1,167 +1,151 @@
 // extension/background.js
-import browser from 'webextension-polyfill'
-import { validateEvent, finalizeEvent, getPublicKey } from 'nostr-tools/pure'
-import * as nip19 from 'nostr-tools/nip19'
-import * as nip04 from 'nostr-tools/nip04'
-import * as nip44 from 'nostr-tools/nip44'
-import { Mutex } from 'async-mutex'
-import { LRUCache } from './utils'
 
+// background.js
+
+import browser from 'webextension-polyfill'
+import {getPublicKey, finalizeEvent, verifyEvent} from 'nostr-tools/pure'
+import {nip04, nip19} from 'nostr-tools'
+import * as nip44 from 'nostr-tools/nip44'
+import { LRUCache } from './utils'
 import {
   NO_PERMISSIONS_REQUIRED,
   getPermissionStatus,
   updatePermission,
   showNotification,
-  getPosition
-} from './common'
-
+  getPosition,
+  getBCHBalance,
+  getFeeRate,
+  getUtxos,
+  broadcastTx,
+  validateUtxos,
+  getBalanceFromUtxos,
+  deriveBCHAddress,
+  signSchnorr,
+  bytesToNumberBE,
+  numberToBytesBE,
+  _hash160
+} from './common';
 import * as secp from '@noble/secp256k1'
+import { sha256 } from '@noble/hashes/sha256'
+import { ripemd160 } from '@noble/hashes/ripemd160'
+import { hexToBytes, bytesToHex } from '@noble/hashes/utils'
 import { hmac } from '@noble/hashes/hmac'
-import { sha256 } from '@noble/hashes/sha2'
-import { ripemd160 } from '@noble/hashes/legacy'
-import { encode } from 'cashaddrjs'
-import {
-  binToHex,
-  cashAddressToLockingBytecode,
-  encodeTransaction,
-  encodeTransactionOutpoints,
-  encodeTransactionOutputs,
-  encodeTransactionInputSequenceNumbersForSigning,
-  generateSigningSerializationBCH,
-  hexToBin,
-  instantiateSha256
-} from '@bitauth/libauth'
 
-const API_BASE = 'https://api.fullstack.cash/v5/electrumx/'
-
+console.log('Background script starting to load...');
 // Enable sync methods in secp
 secp.etc.hmacSha256Sync = (k, ...m) => hmac(sha256, k, secp.etc.concatBytes(...m))
-
 let openPrompt = null
-let promptMutex = new Mutex()
-let releasePromptMutex = () => {}
+let promptMutex = false
 let secretsCache = new LRUCache(100)
 let previousSk = null
-
 function getSharedSecret(sk, peer) {
-  // Detect a key change and erase the cache if they changed their key
   if (previousSk !== sk) {
     secretsCache.clear()
+    previousSk = sk
   }
-
   let key = secretsCache.get(peer)
-
   if (!key) {
     key = nip44.v2.utils.getConversationKey(sk, peer)
     secretsCache.set(peer, key)
   }
-
   return key
 }
-
-//set the width and height of the prompt window
 const width = 440
 const height = 420
-
+const sideEffectTypes = new Set(['tipBCH'])
+const defaultRelays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr-pub.wellorder.net'];
 browser.runtime.onInstalled.addListener((_, __, reason) => {
   if (reason === 'install') browser.runtime.openOptionsPage()
 })
-
 browser.runtime.onMessage.addListener(async (message, sender) => {
-  if (message.openSignUp) {
-    openSignUpWindow()
-    browser.windows.remove(sender.tab.windowId)
-  } else {
-    let {prompt} = message
-    if (prompt) {
-      handlePromptMessage(message, sender)
-    } else {
-      return handleContentScriptMessage(message)
-    }
+  console.log('Received message in background:', message)
+  if (message.prompt) {
+    await handlePromptMessage(message, sender)
+    return
   }
+  let host = sender.url ? new URL(sender.url).host : ''
+  if (!host && sender.url && sender.url.startsWith(browser.runtime.getURL(''))) {
+    host = 'nos2bch'
+  }
+  console.log('Handling content script message:', message, 'host:', host)
+  return handleContentScriptMessage({type: message.type, params: message.params, host})
 })
-
 browser.runtime.onMessageExternal.addListener(
   async ({type, params}, sender) => {
     let extensionId = new URL(sender.url).host
     return handleContentScriptMessage({type, params, host: extensionId})
   }
 )
-
 browser.windows.onRemoved.addListener(_ => {
   if (openPrompt) {
-    // calling this with a simple "no" response will not store anything, so it's fine
-    // it will just return a failure
     handlePromptMessage({accept: false}, null)
   }
 })
-
+function acquirePromptMutex() {
+  if (promptMutex) return false
+  promptMutex = true
+  return true
+}
+function releasePromptMutex() {
+  promptMutex = false
+}
 async function handleContentScriptMessage({type, params, host}) {
   if (NO_PERMISSIONS_REQUIRED[type]) {
-    // authorized, and we won't do anything with private key here, so do a separate handler
     switch (type) {
       case 'replaceURL': {
         let {protocol_handler: ph} = await browser.storage.local.get([
           'protocol_handler'
         ])
         if (!ph) return false
-
         let {url} = params
         let raw = url.split('nostr:')[1]
-        let {type, data} = nip19.decode(raw)
+        let {type: hrp, data} = nip19.decode(raw)
         let replacements = {
           raw,
-          hrp: type,
+          hrp,
           hex:
-            type === 'npub' || type === 'note'
+            hrp === 'npub' || hrp === 'note'
               ? data
-              : type === 'nprofile'
+              : hrp === 'nprofile'
               ? data.pubkey
-              : type === 'nevent'
+              : hrp === 'nevent'
               ? data.id
               : null,
-          p_or_e: {npub: 'p', note: 'e', nprofile: 'p', nevent: 'e'}[type],
-          u_or_n: {npub: 'u', note: 'n', nprofile: 'u', nevent: 'n'}[type],
-          relay0: type === 'nprofile' ? data.relays[0] : null,
-          relay1: type === 'nprofile' ? data.relays[1] : null,
-          relay2: type === 'nprofile' ? data.relays[2] : null
+          p_or_e: {npub: 'p', note: 'e', nprofile: 'p', nevent: 'e'}[hrp],
+          u_or_n: {npub: 'u', note: 'n', nprofile: 'u', nevent: 'n'}[hrp],
+          relay0: hrp === 'nprofile' || hrp === 'nevent' ? data.relays[0] : null,
+          relay1: hrp === 'nprofile' || hrp === 'nevent' ? data.relays[1] : null,
+          relay2: hrp === 'nprofile' || hrp === 'nevent' ? data.relays[2] : null
         }
         let result = ph
         Object.entries(replacements).forEach(([pattern, value]) => {
-          result = result.replace(new RegExp(`{ *${pattern} *}`, 'g'), value)
+          result = result.replace(new RegExp(`{ *${pattern} *}`, 'g'), value || '')
         })
-
         return result
       }
     }
-
     return
   } else {
-    // acquire mutex here before reading policies
-    releasePromptMutex = await promptMutex.acquire()
-
-    // do the operation before asking (because we'll show the encryption/decryption results in the popup
-    const finalResult = await performOperation(type, params)
-
+    if (!acquirePromptMutex()) return {error: {message: 'prompt in progress'}}
+    console.log('Performing operation:', type)
+    let finalResult
     let allowed = await getPermissionStatus(
       host,
       type,
       type === 'signEvent' ? params.event : undefined
     )
-
     if (allowed === true) {
-      // authorized, proceed
+      finalResult = await performOperation(type, params)
       releasePromptMutex()
       showNotification(host, allowed, type, params)
     } else if (allowed === false) {
-      // denied, just refuse immediately
       releasePromptMutex()
       showNotification(host, allowed, type, params)
       return {
         error: {message: 'denied'}
       }
     } else {
-      // ask for authorization
+      // Prompt logic
       try {
         let id = Math.random().toString().slice(4)
         let qs = new URLSearchParams({
@@ -170,109 +154,309 @@ async function handleContentScriptMessage({type, params, host}) {
           params: JSON.stringify(params),
           type
         })
-        if (typeof finalResult === 'string') {
-          qs.set('result', finalResult)
-        }
-        // center prompt
-        const {top, left} = await getPosition(width, height)
-        // prompt will be resolved with true or false
-        let accept = await new Promise((resolve, reject) => {
-          openPrompt = {resolve, reject}
-
-          browser.windows.create({
-            url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
-            type: 'popup',
-            width: width,
-            height: height,
-            top: top,
-            left: left
+        if (sideEffectTypes.has(type)) {
+          const {top, left} = await getPosition(width, height)
+          let {accept, conditions} = await new Promise((resolve, reject) => {
+            openPrompt = {resolve, reject}
+            browser.windows.create({
+              url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
+              type: 'popup',
+              width: width,
+              height: height,
+              top: top,
+              left: left
+            })
           })
-        })
-
-        // denied, stop here
-        if (!accept) return {error: {message: 'denied'}}
+          if (!accept) {
+            releasePromptMutex()
+            return {error: {message: 'denied'}}
+          }
+          if (conditions) await updatePermission(host, type, accept, conditions)
+          finalResult = await performOperation(type, params)
+        } else {
+          finalResult = await performOperation(type, params)
+          if (typeof finalResult === 'string') {
+            qs.set('result', finalResult)
+          }
+          const {top, left} = await getPosition(width, height)
+          let {accept, conditions} = await new Promise((resolve, reject) => {
+            openPrompt = {resolve, reject}
+            browser.windows.create({
+              url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
+              type: 'popup',
+              width: width,
+              height: height,
+              top: top,
+              left: left
+            })
+          })
+          if (!accept) {
+            releasePromptMutex()
+            return {error: {message: 'denied'}}
+          }
+          if (conditions) await updatePermission(host, type, accept, conditions)
+        }
       } catch (err) {
-        // errored, stop here
         releasePromptMutex()
         return {
-          error: {message: err.message, stack: err.stack}
+          error: err.message  // String only
         }
       }
     }
-
-    // the call was authorized, so we just return the result we had from before
     return finalResult
   }
 }
 
 async function performOperation(type, params) {
-  let results = await browser.storage.local.get('private_key')
+  let results = await browser.storage.local.get('private_key');
   if (!results || !results.private_key) {
-    return {error: {message: 'no private key found'}}
+    return { error: 'no private key found' };
   }
-
-  let sk = results.private_key
+  let sk = results.private_key;
   try {
     switch (type) {
       case 'getPublicKey': {
-        return getPublicKey(sk)
+        return getPublicKey(sk);
       }
       case 'signEvent': {
-        const event = finalizeEvent(params.event, sk)
-        return validateEvent(event)
-          ? event
-          : {error: {message: 'invalid event'}}
+        const event = finalizeEvent(params.event, sk);
+        return verifyEvent(event) ? event : { error: 'invalid event' };
       }
       case 'nip04.encrypt': {
-        let {peer, plaintext} = params
-        return nip04.encrypt(sk, peer, plaintext)
+        let { peer, plaintext } = params;
+        return nip04.encrypt(sk, peer, plaintext);
       }
       case 'nip04.decrypt': {
-        let {peer, ciphertext} = params
-        return nip04.decrypt(sk, peer, ciphertext)
+        let { peer, ciphertext } = params;
+        return nip04.decrypt(sk, peer, ciphertext);
       }
       case 'nip44.encrypt': {
-        const {peer, plaintext} = params
-        const key = getSharedSecret(sk, peer)
-
-        return nip44.v2.encrypt(plaintext, key)
+        const { peer, plaintext } = params;
+        const key = getSharedSecret(sk, peer);
+        return nip44.v2.encrypt(plaintext, key);
       }
       case 'nip44.decrypt': {
-        const {peer, ciphertext} = params
-        const key = getSharedSecret(sk, peer)
-
-        return nip44.v2.decrypt(ciphertext, key)
+        const { peer, ciphertext } = params;
+        const key = getSharedSecret(sk, peer);
+        return nip44.v2.decrypt(ciphertext, key);
+      }
+      case 'tipBCH': {
+        const { recipientNpub, amountSat, notify = false } = params;
+        console.log('Performing tipBCH to', recipientNpub, 'amount', amountSat, 'notify', notify);
+        
+        let skBytes = hexToBytes(sk);
+        const originalPoint = secp.Point.fromPrivateKey(skBytes);
+        if (originalPoint.y % 2n === 1n) {
+          const n = secp.CURVE.n;
+          const skBig = bytesToNumberBE(skBytes);
+          const flippedBig = n - skBig;
+          skBytes = numberToBytesBE(flippedBig, 32);
+          console.log('Normalized skBytes to ensure even y-parity for consistency with Nostr');
+        }
+        
+        const pubCompressed = secp.getPublicKey(skBytes, true);
+        const pubHex = bytesToHex(pubCompressed.slice(1));
+        const senderAddress = deriveBCHAddress(pubHex);
+        
+        const recipientPk = nip19.decode(recipientNpub).data;
+        const recipientPubCompressed = new Uint8Array([0x02, ...hexToBytes(recipientPk)]);
+        secp.Point.fromHex(recipientPubCompressed); // Validate
+        const recipientAddress = deriveBCHAddress(recipientPk);
+      
+        chrome.alarms.create('tipKeepAlive', { periodInMinutes: 1 });
+        chrome.alarms.onAlarm.addListener((alarm) => {
+          if (alarm.name === 'tipKeepAlive') console.log('SW keep-alive during tip');
+        });
+      
+        let attempts = 3;
+        while (attempts > 0) {
+          try {
+            let feeRate;
+            const cached = await browser.storage.local.get('cachedFeeRate');
+            if (cached.cachedFeeRate && Date.now() - cached.timestamp < 300000) {
+              feeRate = cached.cachedFeeRate;
+            } else {
+              feeRate = await getFeeRate();
+              browser.storage.local.set({ cachedFeeRate: feeRate, timestamp: Date.now() });
+            }
+            console.log('Fee rate used:', feeRate);
+      
+            const rawUtxos = await getUtxos(senderAddress.toLowerCase());
+            console.log('Raw fetched UTXOs:', JSON.stringify(rawUtxos, null, 2)); // Log raw UTXOs to inspect height and token_data
+            const utxos = validateUtxos(rawUtxos);
+            console.log('Validated UTXOs:', JSON.stringify(utxos, null, 2)); // Log after filtering to debug why sum might be 0
+            const inputSum = getBalanceFromUtxos(utxos);
+            if (inputSum === 0) throw new Error('No valid UTXOs available (check logs for height/token_data issues)');
+      
+            const inputs = utxos.slice(0, Math.min(utxos.length, 10));
+            const senderLockingBytecode = p2pkhLockingBytecode(pubCompressed);
+            const sourceOutputs = inputs.map(input => ({
+              lockingBytecode: senderLockingBytecode,
+              valueSatoshis: BigInt(input.value),
+            }));
+      
+            const outputs = [
+              { lockingBytecode: p2pkhLockingBytecode(recipientPubCompressed), valueSatoshis: BigInt(amountSat) }
+            ];
+      
+            // Improved fee calculation: First assume no change output
+            let baseBytes = 148 * inputs.length + 34 * outputs.length + 10;
+            let baseFee = BigInt(baseBytes * feeRate);
+            let potentialChange = BigInt(inputSum) - BigInt(amountSat) - baseFee;
+      
+            if (potentialChange < 0n) throw new Error('Insufficient funds');
+      
+            let finalFee = baseFee;
+            if (potentialChange > 546n) {
+              // Check if adding change output is viable
+              let bytesWithChange = 148 * inputs.length + 34 * (outputs.length + 1) + 10;
+              let feeWithChange = BigInt(bytesWithChange * feeRate);
+              let actualChange = BigInt(inputSum) - BigInt(amountSat) - feeWithChange;
+      
+              if (actualChange >= 546n) {
+                // Add change output
+                outputs.push({ lockingBytecode: senderLockingBytecode, valueSatoshis: actualChange });
+                finalFee = feeWithChange;
+              } else {
+                // Even with change, it's below dust threshold; proceed without change if possible
+                if (potentialChange < 0n) throw new Error('Insufficient funds');
+                // No change added, stick with baseFee
+              }
+            } // Else: potentialChange <= 546n and >=0n, no change output needed
+      
+            const unsignedTx = {
+              version: 2,
+              inputs: inputs.map(input => ({
+                outpointTransactionHash: reverseBytes(hexToBytes(input.txid)),
+                outpointIndex: input.vout,
+                sequenceNumber: 0,
+                unlockingBytecode: new Uint8Array() // Filled later
+              })),
+              outputs,
+              locktime: 0,
+            };
+      
+            // Precompute shared sighash parts (outside loop)
+            const hashPrevouts = sha256(sha256(concatBytes(...unsignedTx.inputs.map(inp => concatBytes(inp.outpointTransactionHash, le32(inp.outpointIndex))))));
+            const hashSequence = sha256(sha256(concatBytes(...unsignedTx.inputs.map(inp => le32(inp.sequenceNumber)))));
+            const hashOutputs = sha256(sha256(concatBytes(...unsignedTx.outputs.map(out => concatBytes(le64(out.valueSatoshis), varInt(out.lockingBytecode.length), out.lockingBytecode)))));
+            const versionBytes = le32(unsignedTx.version);
+            const locktimeBytes = le32(unsignedTx.locktime);
+            const sighashTypeBytes = le32(0x41); // SIGHASH_ALL | SIGHASH_FORKID
+      
+            for (const [index, input] of unsignedTx.inputs.entries()) {
+              const correspondingSourceOutput = sourceOutputs[index];
+              const scriptCode = correspondingSourceOutput.lockingBytecode;
+              const outpoint = concatBytes(input.outpointTransactionHash, le32(input.outpointIndex));
+              const value = le64(correspondingSourceOutput.valueSatoshis);
+              const sequence = le32(input.sequenceNumber);
+          
+              const preimage = concatBytes(
+                versionBytes,
+                hashPrevouts,
+                hashSequence,
+                outpoint,
+                varInt(scriptCode.length),
+                scriptCode,
+                value,
+                sequence,
+                hashOutputs,
+                locktimeBytes,
+                sighashTypeBytes // 0x41
+              );
+              console.log('Preimage for input ' + index + ': ', bytesToHex(preimage));
+              const sighash = sha256(sha256(preimage));
+              const sig = signSchnorr(sighash, skBytes); // 64-byte Schnorr sig
+              const sigWithType = concatBytes(sig, new Uint8Array([0x41])); // 65 bytes
+              
+              input.unlockingBytecode = concatBytes(
+                new Uint8Array([sigWithType.length]),
+                sigWithType,
+                new Uint8Array([pubCompressed.length]),
+                pubCompressed
+              );
+      
+              await new Promise(r => setTimeout(r, 0)); // Yield to event loop
+            }
+      
+            const encodedTx = encodeTx(unsignedTx);
+            const txHex = bytesToHex(encodedTx);
+            console.log('Built txHex for broadcast:', txHex);
+            const txid = await broadcastTx(txHex);
+      
+            // If notify is true, send a Nostr kind:1 note to the recipient
+            if (notify) {
+              const event = {
+                kind: 1,
+                created_at: Math.floor(Date.now() / 1000),
+                tags: [['p', recipientPk]],
+                content: `Tipped you ${amountSat} sats on Bitcoin Cash! Transaction: https://blockchair.com/bitcoin-cash/transaction/${txid}`
+              };
+              const skHex = bytesToHex(skBytes); // Convert to hex for nostr-tools
+              const signed = finalizeEvent(event, skHex);
+              if (!verifyEvent(signed)) throw new Error('Failed to verify tipped notification event');
+              console.log('Signed notification event:', JSON.stringify(signed, null, 2)); // Debug
+              const relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.mom'];
+              for (const relay of relays) {
+                try {
+                  await publishToRelay(relay, signed);
+                  console.log(`Notification published to ${relay}`);
+                } catch (err) {
+                  console.warn(`Failed to publish to ${relay}:`, err);
+                }
+              }
+            }
+      
+            chrome.alarms.clear('tipKeepAlive');
+            return { txid };
+          } catch (error) {
+            console.error('Tip attempt failed:', error);
+            attempts--;
+            if (attempts > 0) await new Promise(r => setTimeout(r, 2000));
+            else {
+              chrome.alarms.clear('tipKeepAlive');
+              throw error;
+            }
+          }
+        }
       }
     }
   } catch (error) {
-    return {error: {message: error.message, stack: error.stack}}
+    chrome.alarms.clear('tipKeepAlive');
+    console.error('Operation error:', error);
+    return { error: error.message };
   }
 }
 
+async function publishToRelay(relay, event) {
+  return new Promise((res, rej) => {
+    const ws = new WebSocket(relay);
+    const timeout = setTimeout(() => { ws.close(); rej('timeout'); }, 5000);
+    ws.onopen = () => ws.send(JSON.stringify(['EVENT', event]));
+    ws.onmessage = (msg) => {
+      const data = JSON.parse(msg.data);
+      if (data[0] === 'OK' && data[1] === event.id) {
+        clearTimeout(timeout);
+        ws.close();
+        res();
+      }
+    };
+    ws.onerror = (err) => { clearTimeout(timeout); ws.close(); rej(err); };
+    ws.onclose = () => rej('closed');
+  });
+}
 async function handlePromptMessage({host, type, accept, conditions}, sender) {
-  // return response
-  openPrompt?.resolve?.(accept)
-
-  // update policies
-  if (conditions) {
-    await updatePermission(host, type, accept, conditions)
-  }
-
-  // cleanup this
+  openPrompt?.resolve?.({accept, conditions})
   openPrompt = null
-
-  // release mutex here after updating policies
   releasePromptMutex()
-
-  // close prompt
   if (sender) {
-    browser.windows.remove(sender.tab.windowId)
+    if (sender.tab && sender.tab.windowId) {
+      browser.windows.remove(sender.tab.windowId).catch(() => {});
+    }
   }
 }
-
 async function openSignUpWindow() {
   const {top, left} = await getPosition(width, height)
-
   browser.windows.create({
     url: `${browser.runtime.getURL('signup.html')}`,
     type: 'popup',
@@ -282,153 +466,84 @@ async function openSignUpWindow() {
     left: left
   })
 }
-
 // --- BCH Helpers ---
-function _hash160 (x) {
-  return ripemd160(sha256(x))
-}
-
-function _encodeDer (r, s) {
-  function encodeInt (val) {
-    let bytes = []
-    let tmp = val
-    if (tmp === 0n) bytes.push(0)
-    while (tmp > 0n) {
-      bytes.push(Number(tmp & 0xffn))
-      tmp >>= 8n
-    }
-    bytes = bytes.reverse()
-    if (bytes[0] & 0x80) bytes.unshift(0)
-    return new Uint8Array([0x02, bytes.length, ...bytes])
+function concatBytes(...arrays) {
+  const totalLen = arrays.reduce((sum, a) => sum + a.length, 0);
+  const result = new Uint8Array(totalLen);
+  let offset = 0;
+  for (const arr of arrays) {
+    result.set(arr, offset);
+    offset += arr.length;
   }
-  const rEnc = encodeInt(r)
-  const sEnc = encodeInt(s)
-  const totalLen = rEnc.length + sEnc.length
-  return new Uint8Array([0x30, totalLen, ...rEnc, ...sEnc])
+  return result;
 }
 
-function _buildP2PKHOutput (address) {
-  const result = cashAddressToLockingBytecode(address)
-  if (typeof result === 'string') {
-    throw new Error(result)
+function le32(n) {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, n, true);
+  return b;
+}
+
+function le64(n) {
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setBigUint64(0, BigInt(n), true);
+  return b;
+}
+
+function varInt(val) {
+  if (val < 0xfd) return new Uint8Array([val]);
+  if (val <= 0xffff) {
+    const b = new Uint8Array(3);
+    b[0] = 0xfd;
+    new DataView(b.buffer).setUint16(1, val, true);
+    return b;
   }
-  return result.bytecode
+  if (val <= 0xffffffff) {
+    const b = new Uint8Array(5);
+    b[0] = 0xfe;
+    new DataView(b.buffer).setUint32(1, val, true);
+    return b;
+  }
+  const b = new Uint8Array(9);
+  b[0] = 0xff;
+  new DataView(b.buffer).setBigUint64(1, BigInt(val), true);
+  return b;
 }
 
-// async function sendTip (senderNpub, nsec, recipientNpub, amountSat) {
-//   const { type, data: privBytes } = nip19.decode(nsec)
-//   if (type !== 'nsec') {
-//     return { success: false, error: 'Invalid nsec' }
-//   }
+function reverseBytes(b) {
+  const rev = new Uint8Array(b.length);
+  for (let i = 0; i < b.length; i++) rev[i] = b[b.length - 1 - i];
+  return rev;
+}
 
-//   const compressedPub = secp.getPublicKey(privBytes, true)
-//   const senderPkh = _hash160(compressedPub)
-//   const senderAddress = encode('bitcoincash', 'P2PKH', senderPkh)
+function p2pkhLockingBytecode(pubCompressed) {
+  const h = _hash160(pubCompressed);
+  return new Uint8Array([0x76, 0xa9, 0x14, ...h, 0x88, 0xac]);
+}
 
-//   const recipientHex = nip19.decode(recipientNpub).data
-//   const recipientXBytes = secp.utils.hexToBytes(recipientHex)
-//   const recipientCompressedPub = new Uint8Array([0x02, ...recipientXBytes])
-//   const recipientPkh = _hash160(recipientCompressedPub)
-//   const recipientAddress = encode('bitcoincash', 'P2PKH', recipientPkh)
+function encodeTx(tx) {
+  const inpCount = varInt(tx.inputs.length);
+  const outCount = varInt(tx.outputs.length);
+  const inputsSer = tx.inputs.map(inp => concatBytes(
+    inp.outpointTransactionHash,
+    le32(inp.outpointIndex),
+    varInt(inp.unlockingBytecode.length),
+    inp.unlockingBytecode,
+    le32(inp.sequenceNumber)
+  ));
+  const outputsSer = tx.outputs.map(out => concatBytes(
+    le64(out.valueSatoshis),
+    varInt(out.lockingBytecode.length),
+    out.lockingBytecode
+  ));
+  return concatBytes(
+    le32(tx.version),
+    inpCount,
+    ...inputsSer,
+    outCount,
+    ...outputsSer,
+    le32(tx.locktime)
+  );
+}
 
-//   const utxoRes = await fetch(`${API_BASE}utxos/${senderAddress}`)
-//   if (!utxoRes.ok) {
-//     return { success: false, error: 'Failed to fetch UTXOs' }
-//   }
-//   const utxoData = await utxoRes.json()
-//   if (!utxoData.success || !utxoData.utxos.length) {
-//     return { success: false, error: 'No UTXOs found' }
-//   }
-
-//   const sha256Instance = await instantiateSha256()
-//   const sha256Hash = sha256Instance.hash
-
-//   return new Promise((resolve) => {
-//     sendTransaction(senderAddress, recipientAddress, amountSat, utxoData.utxos, sha256Hash, privBytes, (err, txId) => {
-//       if (err) {
-//         resolve({ success: false, error: err.message })
-//       } else {
-//         resolve({ success: true, txId })
-//       }
-//     })
-//   })
-// }
-
-// function sendTransaction (senderAddress, recipientAddress, amountSat, utxos, sha256, privBytes, callback) {
-//   const transaction = {
-//     version: 2,
-//     inputs: utxos.map(utxo => ({
-//       outpointTransactionHash: hexToBin(utxo.txid),
-//       outpointIndex: utxo.vout,
-//       unlockingBytecode: new Uint8Array(),
-//       sequenceNumber: 0xffffffff
-//     })),
-//     outputs: [{
-//       valueSatoshis: BigInt(amountSat),
-//       lockingBytecode: _buildP2PKHOutput(recipientAddress)
-//     }],
-//     locktime: 0
-//   }
-
-//   // Calculate fee and add change output
-//   const inputCount = utxos.length
-//   const estimatedSize = 10 + inputCount * 148 + 34 * 2 // Base + inputs + 2 outputs
-//   const fee = BigInt(estimatedSize) // 1 sat/byte, adjust if needed
-//   const totalInput = utxos.reduce((sum, utxo) => sum + BigInt(utxo.value), 0n)
-//   const change = totalInput - BigInt(amountSat) - fee
-//   if (change < 0n) {
-//     callback(new Error('Insufficient funds'))
-//     return
-//   }
-//   if (change > 546n) { // Dust limit
-//     transaction.outputs.push({
-//       valueSatoshis: change,
-//       lockingBytecode: _buildP2PKHOutput(senderAddress)
-//     })
-//   }
-
-//   transaction.inputs.forEach((input, i) => {
-//     const coveredBytecode = hexToBin(utxos[i].scriptPubKey)
-//     const transactionOutpointsHash = sha256(sha256(encodeTransactionOutpoints(transaction.inputs)))
-//     const transactionSequenceNumbersHash = sha256(sha256(encodeTransactionInputSequenceNumbersForSigning(transaction.inputs)))
-//     const transactionOutputsHash = sha256(sha256(encodeTransactionOutputs(transaction.outputs)))
-//     const preimage = generateSigningSerializationBCH({
-//       forkId: BigInt(0),
-//       coveredBytecode,
-//       outpointTransactionHash: input.outpointTransactionHash,
-//       outpointIndex: input.outpointIndex,
-//       sequenceNumber: input.sequenceNumber,
-//       valueSatoshis: BigInt(utxos[i].value),
-//       version: transaction.version,
-//       transactionOutpointsHash,
-//       transactionSequenceNumbersHash,
-//       transactionOutputsHash,
-//       locktime: transaction.locktime,
-//       signingSerializationType: BigInt(0x41)
-//     })
-//     const message = sha256(sha256(preimage))
-//     const sig = secp.sign(message, privBytes, { der: false })
-//     const derSig = _encodeDer(sig.r, sig.s)
-//     const sigWithType = new Uint8Array([...derSig, 0x41])
-//     const pubkey = secp.getPublicKey(privBytes, true)
-//     input.unlockingBytecode = new Uint8Array([sigWithType.length, ...sigWithType, pubkey.length, ...pubkey])
-//   })
-
-//   const rawTx = binToHex(encodeTransaction(transaction))
-
-//   fetch(`${API_BASE}broadcast`, {
-//     method: 'POST',
-//     body: JSON.stringify({ rawtx: rawTx }),
-//     headers: { 'Content-Type': 'application/json' }
-//   })
-//     .then(broadcastRes => {
-//       if (!broadcastRes.ok) throw new Error(`Broadcast error: ${broadcastRes.statusText}`)
-//       return broadcastRes.json()
-//     })
-//     .then(data => {
-//       callback(null, data.txid)
-//     })
-//     .catch(e => {
-//       callback(e)
-//     })
-// }
+console.log('Background script loaded successfully');

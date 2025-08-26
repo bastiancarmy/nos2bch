@@ -12,7 +12,8 @@
   },
   "options_page": "options.html",
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "action": {
     "default_title": "nos2bch",
@@ -23,11 +24,12 @@
       "run_at": "document_end",
       "matches": ["<all_urls>"],
       "js": ["content-script.js"],
-      "all_frames": true
+      "all_frames": true,
+      "type": "module"
     }
   ],
-  "permissions": ["storage", "activeTab", "windows"],
-  "host_permissions": ["https://api.fullstack.cash/*", "https://iris.to/*"],
+  "permissions": ["storage", "activeTab", "windows", "alarms"],
+  "host_permissions": ["https://api.fullstack.cash/*", "https://iris.to/*", "https://api.blockchair.com/*"],
   "optional_permissions": ["notifications"],
   "web_accessible_resources": [
     {
@@ -40,5 +42,8 @@
         "http://*.localhost/*"
       ]
     }
-  ]
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
 }
