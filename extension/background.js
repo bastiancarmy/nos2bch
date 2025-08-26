@@ -17,7 +17,10 @@ import {
   broadcastTx,
   validateUtxos,
   getBalanceFromUtxos,
-  deriveBCHAddress
+  deriveBCHAddress,
+  bytesToNumberBE,
+  numberToBytesBE,
+  signSchnorr
 } from './common';
 import * as secp from '@noble/secp256k1'
 import { sha256 } from '@noble/hashes/sha256'
@@ -239,23 +242,22 @@ async function performOperation(type, params) {
         console.log('Performing tipBCH to', recipientNpub, 'amount', amountSat, 'notify', notify);
         
         let skBytes = hexToBytes(sk);
-        let point = secp.Point.fromPrivateKey(skBytes);
-        if (point.toAffine().y % 2n === 1n) { // if odd Y, flip
+        const originalPoint = secp.Point.fromPrivateKey(skBytes);
+        if (originalPoint.y % 2n === 1n) {
           const n = secp.CURVE.n;
-          const skBig = secp.utils.bytesToNumberBE(skBytes);
+          const skBig = bytesToNumberBE(skBytes);
           const flippedBig = n - skBig;
-          skBytes = secp.utils.numberToBytesBE(flippedBig, 32);
-          point = secp.Point.fromPrivateKey(skBytes);
+          skBytes = numberToBytesBE(flippedBig, 32);
           console.log('Normalized skBytes to ensure even y-parity for consistency with Nostr');
         }
         
-        const pubHex = bytesToHex(point.toRawX());
-        const pubCompressed = secp.getPublicKey(skBytes); // Always even y prefix (02/03 correct)
+        const pubCompressed = secp.getPublicKey(skBytes);
+        const pubHex = bytesToHex(pubCompressed.slice(1));
         const senderAddress = deriveBCHAddress(pubHex);
         
         const recipientPk = nip19.decode(recipientNpub).data;
-        const recipientPoint = secp.Point.fromHex(recipientPk);
-        const recipientPubCompressed = secp.getPublicKey(hexToBytes(recipientPk)); // Noble handles prefix
+        const recipientPubCompressed = new Uint8Array([0x02, ...hexToBytes(recipientPk)]);
+        secp.Point.fromHex(recipientPubCompressed); // Validate
         const recipientAddress = deriveBCHAddress(recipientPk);
       
         chrome.alarms.create('tipKeepAlive', { periodInMinutes: 1 });
@@ -274,6 +276,7 @@ async function performOperation(type, params) {
               feeRate = await getFeeRate();
               browser.storage.local.set({ cachedFeeRate: feeRate, timestamp: Date.now() });
             }
+            console.log('Fee rate used:', feeRate);
       
             const rawUtxos = await getUtxos(senderAddress.toLowerCase());
             console.log('Raw fetched UTXOs:', JSON.stringify(rawUtxos, null, 2)); // Log raw UTXOs to inspect height and token_data
@@ -358,6 +361,7 @@ async function performOperation(type, params) {
                 locktimeBytes,
                 sighashTypeBytes // 0x41
               );
+              console.log('Preimage for input ' + index + ': ', bytesToHex(preimage));
               const sighash = sha256(sha256(preimage));
               const sig = signSchnorr(sighash, skBytes); // 64-byte Schnorr sig
               

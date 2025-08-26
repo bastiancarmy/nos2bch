@@ -239,8 +239,9 @@ export async function getFeeRate() {
   const client = await connectElectrum();
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const fee = await client.request('blockchain.estimatefee', 2);  // Estimate for 2 blocks (fast)
-      const feeRate = Math.max(1, Math.round(fee * 100000000));  // BCH to sat/byte
+      let fee = await client.request('blockchain.estimatefee', 2);  // Estimate for 2 blocks (fast)
+      if (fee < 0) fee = 0.00001; // Fallback if no estimate
+      const feeRate = Math.max(1, Math.round(fee * 100000));  // BCH/kb to sat/byte
       await browser.storage.local.set({lastFeeRate: feeRate, lastFeeRateTime: Date.now()})
       return feeRate
     } catch (err) {
@@ -282,8 +283,11 @@ export async function broadcastTx(rawTx) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const response = await client.request('blockchain.transaction.broadcast', rawTx);
-      if (typeof response !== 'string' || response.length !== 64 || !/^[0-9a-f]{64}$/i.test(response)) {
-        throw new Error(`Invalid broadcast response: ${JSON.stringify(response)}`);
+      console.log('Raw broadcast response:', response);
+      if (typeof response === 'object' && response.error) {
+        throw new Error('Broadcast error: ' + response.error);
+      } else if (typeof response !== 'string' || response.length !== 64 || !/^[0-9a-f]{64}$/i.test(response)) {
+        throw new Error('Invalid broadcast response: ' + JSON.stringify(response));
       }
       console.log(`Broadcast successful, txid: ${response}`);
       return response;
@@ -457,6 +461,23 @@ export function utf8ToBytes(str) {
   return new TextEncoder().encode(str);
 }
 
+export function bytesToNumberBE(bytes) {
+  let num = 0n;
+  for (const byte of bytes) {
+    num = (num * 256n) + BigInt(byte);
+  }
+  return num;
+}
+
+export function numberToBytesBE(num, len) {
+  const bytes = new Uint8Array(len);
+  for (let i = len - 1; i >= 0; i--) {
+    bytes[i] = Number(num & 255n);
+    num >>= 8n;
+  }
+  return bytes;
+}
+
 export function rfc6979K(privBytes, h1) {
   const n = secp.CURVE.n;
   let k = new Uint8Array(32).fill(0);
@@ -468,7 +489,7 @@ export function rfc6979K(privBytes, h1) {
   let attempts = 0;
   while (attempts < 10000) {
     v = secp.etc.hmacSha256Sync(k, v);
-    const candidate = secp.utils.bytesToNumberBE(v);
+    const candidate = bytesToNumberBE(v);
     if (candidate >= 1n && candidate < n) return candidate;
     k = secp.etc.hmacSha256Sync(k, secp.etc.concatBytes(v, new Uint8Array([0x00])));
     v = secp.etc.hmacSha256Sync(k, v);
@@ -494,17 +515,19 @@ export function signSchnorr(sighash, privBytes) {
   const h1 = sha256(secp.etc.concatBytes(utf8ToBytes('Schnorr+SHA256'), sighash)); // BCH-spec prefix to avoid ECDSA conflict
   const k = rfc6979K(privBytes, h1);
   let R = secp.Point.fromPrivateKey(k);
+  const y = R.y;
+  const legendre = modPow(y, (P - 1n) / 2n, P);
   let kBig = k;
-  if (R.toAffine().y % 2n === 1n) { // If y odd, flip
+  if (legendre !== 1n) { // Adjust for positive Jacobi symbol
     kBig = (n - k) % n;
     R = R.negate();
   }
   const rBig = R.x;
-  const rBytes = secp.utils.numberToBytesBE(rBig, 32);
+  const rBytes = numberToBytesBE(rBig, 32);
   const pubBytes = secp.getPublicKey(privBytes);
   const eBytes = sha256(secp.etc.concatBytes(rBytes, pubBytes, sighash));
-  const e = secp.utils.bytesToNumberBE(eBytes) % n;
-  const sBig = (kBig + e * secp.utils.bytesToNumberBE(privBytes)) % n;
-  const sBytes = secp.utils.numberToBytesBE(sBig, 32);
+  const e = bytesToNumberBE(eBytes) % n;
+  const sBig = (kBig + e * bytesToNumberBE(privBytes)) % n;
+  const sBytes = numberToBytesBE(sBig, 32);
   return secp.etc.concatBytes(rBytes, sBytes); // 64-byte sig
 }
