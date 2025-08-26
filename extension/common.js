@@ -1,3 +1,5 @@
+// extension/common.js
+
 // common.js
 
 import browser from 'webextension-polyfill'
@@ -442,7 +444,7 @@ export function getBalanceFromUtxos(utxos) {
 export function validateUtxos(utxos) {
   console.log('Validating UTXOs - Raw input:', JSON.stringify(utxos, null, 2)); // Log before filter
   const filtered = utxos.filter(utxo => {
-    const isValid = utxo.height > 0 && (utxo.token_data == null); // Updated to utxo.token_data == null to handle undefined/null explicitly (covers if API sets null)
+    const isValid = utxo.height >= 0 && (utxo.token_data == null); // Updated to utxo.token_data == null to handle undefined/null explicitly (covers if API sets null)
     console.log(`UTXO ${utxo.txid}:${utxo.vout} - height: ${utxo.height}, token_data: ${JSON.stringify(utxo.token_data)}, valid: ${isValid}`);
     return isValid;
   });
@@ -478,13 +480,13 @@ export function numberToBytesBE(num, len) {
   return bytes;
 }
 
-export function rfc6979K(privBytes, h1) {
+export function rfc6979K(privBytes, h1, additional) {
   const n = secp.CURVE.n;
   let k = new Uint8Array(32).fill(0);
   let v = new Uint8Array(32).fill(1);
-  k = secp.etc.hmacSha256Sync(k, secp.etc.concatBytes(v, new Uint8Array([0x00]), privBytes, h1));
+  k = secp.etc.hmacSha256Sync(k, secp.etc.concatBytes(v, new Uint8Array([0x00]), privBytes, h1, additional));
   v = secp.etc.hmacSha256Sync(k, v);
-  k = secp.etc.hmacSha256Sync(k, secp.etc.concatBytes(v, new Uint8Array([0x01]), privBytes, h1));
+  k = secp.etc.hmacSha256Sync(k, secp.etc.concatBytes(v, new Uint8Array([0x01]), privBytes, h1, additional));
   v = secp.etc.hmacSha256Sync(k, v);
   let attempts = 0;
   while (attempts < 10000) {
@@ -512,22 +514,24 @@ export function modPow(base, exp, mod) {
 export function signSchnorr(sighash, privBytes) {
   const P = secp.CURVE.p;
   const n = secp.CURVE.n;
-  const h1 = sha256(secp.etc.concatBytes(utf8ToBytes('Schnorr+SHA256'), sighash)); // BCH-spec prefix to avoid ECDSA conflict
-  const k = rfc6979K(privBytes, h1);
-  let R = secp.Point.fromPrivateKey(k);
+  const additional = utf8ToBytes('Schnorr+SHA256  '); // 16-byte ASCII with two spaces
+  const k = rfc6979K(privBytes, sighash, additional);
+  let R = secp.Point.BASE.multiply(k);
   const y = R.y;
-  const legendre = modPow(y, (P - 1n) / 2n, P);
+  const jacobi = modPow(y, (P - 1n) / 2n, P);
   let kBig = k;
-  if (legendre !== 1n) { // Adjust for positive Jacobi symbol
-    kBig = (n - k) % n;
+  if (jacobi === 0n) throw new Error('Invalid R Jacobi');
+  if (jacobi !== 1n) {
+    kBig = n - k;
     R = R.negate();
   }
   const rBig = R.x;
   const rBytes = numberToBytesBE(rBig, 32);
-  const pubBytes = secp.getPublicKey(privBytes);
+  const pubBytes = secp.getPublicKey(privBytes, true); // Compressed 33 bytes
   const eBytes = sha256(secp.etc.concatBytes(rBytes, pubBytes, sighash));
   const e = bytesToNumberBE(eBytes) % n;
-  const sBig = (kBig + e * bytesToNumberBE(privBytes)) % n;
+  const privBig = bytesToNumberBE(privBytes);
+  const sBig = (kBig + e * privBig) % n;
   const sBytes = numberToBytesBE(sBig, 32);
   return secp.etc.concatBytes(rBytes, sBytes); // 64-byte sig
 }

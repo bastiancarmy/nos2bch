@@ -1,3 +1,5 @@
+// extension/background.js
+
 // background.js
 
 import browser from 'webextension-polyfill'
@@ -18,9 +20,10 @@ import {
   validateUtxos,
   getBalanceFromUtxos,
   deriveBCHAddress,
+  signSchnorr,
   bytesToNumberBE,
   numberToBytesBE,
-  signSchnorr
+  _hash160
 } from './common';
 import * as secp from '@noble/secp256k1'
 import { sha256 } from '@noble/hashes/sha256'
@@ -251,7 +254,7 @@ async function performOperation(type, params) {
           console.log('Normalized skBytes to ensure even y-parity for consistency with Nostr');
         }
         
-        const pubCompressed = secp.getPublicKey(skBytes);
+        const pubCompressed = secp.getPublicKey(skBytes, true);
         const pubHex = bytesToHex(pubCompressed.slice(1));
         const senderAddress = deriveBCHAddress(pubHex);
         
@@ -364,10 +367,11 @@ async function performOperation(type, params) {
               console.log('Preimage for input ' + index + ': ', bytesToHex(preimage));
               const sighash = sha256(sha256(preimage));
               const sig = signSchnorr(sighash, skBytes); // 64-byte Schnorr sig
+              const sigWithType = concatBytes(sig, new Uint8Array([0x41])); // 65 bytes
               
               input.unlockingBytecode = concatBytes(
-                new Uint8Array([sig.length]),
-                sig,
+                new Uint8Array([sigWithType.length]),
+                sigWithType,
                 new Uint8Array([pubCompressed.length]),
                 pubCompressed
               );
@@ -388,9 +392,10 @@ async function performOperation(type, params) {
                 tags: [['p', recipientPk]],
                 content: `Tipped you ${amountSat} sats on Bitcoin Cash! Transaction: https://blockchair.com/bitcoin-cash/transaction/${txid}`
               };
-              const signed = finalizeEvent(event, skBytes); // Assumes finalizeEvent accepts bytes; if not, use bytesToHex(skBytes)
+              const skHex = bytesToHex(skBytes); // Convert to hex for nostr-tools
+              const signed = finalizeEvent(event, skHex);
               if (!verifyEvent(signed)) throw new Error('Failed to verify tipped notification event');
-      
+              console.log('Signed notification event:', JSON.stringify(signed, null, 2)); // Debug
               const relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.mom'];
               for (const relay of relays) {
                 try {
@@ -462,29 +467,6 @@ async function openSignUpWindow() {
   })
 }
 // --- BCH Helpers ---
-function _hash160(x) {
-  return ripemd160(sha256(x));
-}
-
-function _encodeDer(r, s) {
-  function encodeInt(val) {
-    let bytes = [];
-    let tmp = val;
-    if (tmp === 0n) bytes.push(0);
-    while (tmp > 0n) {
-      bytes.push(Number(tmp & 0xffn));
-      tmp >>= 8n;
-    }
-    bytes = bytes.reverse();
-    if (bytes[0] & 0x80) bytes.unshift(0);
-    return new Uint8Array([0x02, bytes.length, ...bytes]);
-  }
-  const rEnc = encodeInt(r);
-  const sEnc = encodeInt(s);
-  const totalLen = rEnc.length + sEnc.length;
-  return new Uint8Array([0x30, totalLen, ...rEnc, ...sEnc]);
-}
-
 function concatBytes(...arrays) {
   const totalLen = arrays.reduce((sum, a) => sum + a.length, 0);
   const result = new Uint8Array(totalLen);
