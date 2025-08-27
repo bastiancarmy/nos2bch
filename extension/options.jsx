@@ -1,9 +1,3 @@
-// extension/options.jsx
-// Updates:
-// - Moved all function definitions (handleKeyChange, generate, saveKey, etc.) before the return statement to avoid unreachable code.
-// - Ensured all dependencies and variables are properly defined/imported.
-// - No other changes; this fixes the ReferenceError as functions are now accessible in JSX.
-
 import {bytesToHex, hexToBytes} from '@noble/hashes/utils'
 import {getPublicKey} from 'nostr-tools'
 import * as nip19 from 'nostr-tools/nip19'
@@ -389,7 +383,14 @@ function Options() {
             {bchAddress && (
               <div>
                 <div>BCH Address (from npub): {bchAddress}</div>
-                <div>BCH Balance: {formattedBalance} {formattedBCH ? `(${formattedBCH})` : ''}</div>
+                <QRCodeSVG
+                  value={bchAddress.toUpperCase()}
+                  size={256}
+                  level="H"
+                  style={{margin: '10px 0'}}
+                />
+                <div>BCH Balance: {balanceLoading ? <span>Loading... <span className="spinner" /></span> :
+                  (bchBalance !== null ? `${formattedBalance} ${formattedBCH ? `(${formattedBCH})` : ''}` : 'Error - <button onClick={() => refreshBalance(bchAddress)}>Retry</button>')}</div>
                 <button onClick={() => refreshBalance(bchAddress)} disabled={balanceLoading}>Refresh Balance</button>
               </div>
             )}
