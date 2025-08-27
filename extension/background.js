@@ -384,15 +384,17 @@ async function performOperation(type, params) {
             console.log('Built txHex for broadcast:', txHex);
             const txid = await broadcastTx(txHex);
       
-            // If notify is true, send a Nostr kind:1 note to the recipient
+            // If notify is true, send a Nostr kind:4 DM to the recipient
             if (notify) {
+              const skHex = bytesToHex(skBytes); // Convert to hex for nostr-tools
+              const plaintext = `Tipped you ${amountSat} sats on Bitcoin Cash! Transaction: https://blockchair.com/bitcoin-cash/transaction/${txid}\n\nDownload the nos2bch Chrome extension to claim your tips: https://chrome.google.com/webstore/detail/nos2bch/[EXTENSION_ID_PLACEHOLDER]`;
+              const ciphertext = nip04.encrypt(skHex, recipientPk, plaintext);
               const event = {
-                kind: 1,
+                kind: 4,
                 created_at: Math.floor(Date.now() / 1000),
                 tags: [['p', recipientPk]],
-                content: `Tipped you ${amountSat} sats on Bitcoin Cash! Transaction: https://blockchair.com/bitcoin-cash/transaction/${txid}`
+                content: ciphertext
               };
-              const skHex = bytesToHex(skBytes); // Convert to hex for nostr-tools
               const signed = finalizeEvent(event, skHex);
               if (!verifyEvent(signed)) throw new Error('Failed to verify tipped notification event');
               console.log('Signed notification event:', JSON.stringify(signed, null, 2)); // Debug
