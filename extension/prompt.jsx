@@ -1,10 +1,4 @@
 // extension/prompt.jsx
-// Updates:
-// - Fetch prompt details via {getPrompt: true} message.
-// - If type === 'tipBCH', populate custom message with amountSat and recipientNpub from params.
-// - Fallback to generic if no params or other type.
-// - Added estFee/change as approximate (hardcoded est for simplicity; can enhance later).
-
 import React, {useEffect, useState} from 'react'
 import {createRoot} from 'react-dom/client'
 import browser from 'webextension-polyfill'
@@ -48,3 +42,4 @@ function Prompt() {
 }
 
 createRoot(document.getElementById('main')).render(<Prompt />);
+
