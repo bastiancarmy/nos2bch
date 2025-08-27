@@ -1,8 +1,8 @@
 // extension/options.jsx
 // Updates:
 // - Moved all function definitions (handleKeyChange, generate, saveKey, etc.) before the return statement to avoid unreachable code.
-// - Ensured all dependencies and variables are properly defined/imported.
-// - No other changes; this fixes the ReferenceError as functions are now accessible in JSX.
+ // - Ensured all dependencies and variables are properly defined/imported.
+ // - No other changes; this fixes the ReferenceError as functions are now accessible in JSX.
 
 import {bytesToHex, hexToBytes} from '@noble/hashes/utils'
 import {getPublicKey} from 'nostr-tools'
@@ -43,6 +43,11 @@ function Options() {
   let [txHistory, setTxHistory] = useState([])
   let [loading, setLoading] = useState(true)
   let [balanceLoading, setBalanceLoading] = useState(false)
+  let [nwcConnections, setNwcConnections] = useState([]) // New: Load connections
+  let [selectedNwc, setSelectedNwc] = useState([]) // For revoke
+  let [nwcUri, setNwcUri] = useState('') // For generated URI in options
+  let [showNwcQr, setShowNwcQr] = useState(false) // Toggle QR in options
+  let [nwcMessage, setNwcMessage] = useState('') // Educational banner
   const showMessage = msg => {
     setMessages(messages => [...messages, msg])
   }
@@ -55,7 +60,7 @@ function Options() {
   }, [messages, setMessages])
   useEffect(() => {
     (async () => {
-      const results = await browser.storage.local.get(['private_key', 'protocol_handler', 'notifications', 'lastBchBalance', 'lastBchBalanceTime']);
+      const results = await browser.storage.local.get(['private_key', 'protocol_handler', 'notifications', 'lastBchBalance', 'lastBchBalanceTime', 'nwcConnections']); // Added nwcConnections
       console.log('Options storage loaded:', results);
       if (results.private_key) {
         let prvKey = results.private_key
@@ -92,6 +97,7 @@ function Options() {
       if (results.notifications) {
         setNotifications(true)
       }
+      setNwcConnections(results.nwcConnections || []) // Load connections
       setLoading(false)
     })();
   }, [])
@@ -310,6 +316,37 @@ function Options() {
       showMessage('Encrypted key displayed!')
     } catch (err) {
       showMessage('Encryption failed: ' + err.message)
+    }
+  }
+  async function handleGenerateNwc() {
+    try {
+      const uri = await browser.runtime.sendMessage({ type: 'generateNWCConnection' }); // From background
+      showMessage('NWC URI generated! Copy and paste into Primal for private BCH tip notifications. (NIP-XX proposal for full on-chain support pending—beta testing!)')
+      // Refresh connections
+      const { nwcConnections } = await browser.storage.local.get('nwcConnections');
+      setNwcConnections(nwcConnections || [])
+      setNwcUri(uri) // Set for display
+      setShowNwcQr(true)
+      setNwcMessage('Generated URI: ' + uri + '. Connect to receive private tip alerts and tip others with BCH via npub. (NIP-XX proposal pending)')
+    } catch (err) {
+      showMessage('NWC generation failed: ' + err.message)
+    }
+  }
+  async function handleRevokeNwc(id) {
+    const { nwcConnections } = await browser.storage.local.get('nwcConnections');
+    const updated = nwcConnections.filter(c => c.id !== id);
+    await browser.storage.local.set({ nwcConnections: updated });
+    setNwcConnections(updated);
+    showMessage('NWC connection revoked')
+  }
+  async function updateBudget(id, newMaxSat) {
+    const { nwcConnections } = await browser.storage.local.get('nwcConnections');
+    const conn = nwcConnections.find(c => c.id === id);
+    if (conn) {
+      conn.permissions.budget.maxSat = parseInt(newMaxSat);
+      await browser.storage.local.set({ nwcConnections });
+      showMessage('Budget updated')
+      setNwcConnections([...nwcConnections]); // Refresh UI
     }
   }
 
@@ -620,6 +657,42 @@ function Options() {
           </div>
         )}
       </div>
+      {/* New NWC Management Section */}
+      <h2>NWC Connections</h2>
+      <button onClick={handleGenerateNwc}>Generate New NWC Connection</button>
+      <p>Paste generated URI into Primal for private BCH tip notifications. Receive tips and get alerted to tip others with BCH via npub. (NIP-XX proposal for on-chain support pending—beta testing!)</p>
+      {nwcUri && <div>NWC URI: {nwcUri} <button onClick={() => navigator.clipboard.writeText(nwcUri)}>Copy</button></div>}
+      {showNwcQr && nwcUri && <QRCodeSVG value={nwcUri} size={256} level="H" style={{margin: '10px 0'}} />}
+      {nwcConnections.length === 0 ? <div>No connections</div> : (
+        <table>
+          <thead>
+            <tr>
+              <th>Pubkey</th>
+              <th>Relay</th>
+              <th>Budget (max sat/daily)</th>
+              <th>Revoke</th>
+            </tr>
+          </thead>
+          <tbody>
+            {nwcConnections.map((conn, index) => (
+              <tr key={conn.id}>
+                <td>{conn.walletPubkey.slice(0, 10)}...</td>
+                <td>{conn.relay}</td>
+                <td>
+                  <input
+                    type="number"
+                    value={conn.permissions.budget.maxSat}
+                    onChange={e => updateBudget(conn.id, e.target.value)}
+                    style={{width: '80px'}}
+                  />
+                </td>
+                <td><button onClick={() => handleRevokeNwc(conn.id)}>Revoke</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {nwcMessage && <div style={{color: 'blue'}}>{nwcMessage}</div>} {/* Educational banner */}
     </>
   )
 }

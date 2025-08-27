@@ -29,6 +29,9 @@ function Popup() {
   const [loading, setLoading] = useState(false)
   const [balanceLoading, setBalanceLoading] = useState(true)
   const [result, setResult] = useState(null)  // New state for result
+  const [nwcUri, setNwcUri] = useState('') // For generated URI
+  const [showNwcQr, setShowNwcQr] = useState(false) // Toggle QR
+  const [nwcMessage, setNwcMessage] = useState('') // For educational banners
 
   useEffect(() => {
     (async () => {
@@ -62,6 +65,17 @@ function Popup() {
       setError('Error loading balance: ' + err.message)
     } finally {
       setBalanceLoading(false)
+    }
+  }
+
+  async function handleGenerateNwc() {
+    try {
+      const uri = await browser.runtime.sendMessage({ type: 'generateNWCConnection' }); // Message to background for generation
+      setNwcUri(uri)
+      setShowNwcQr(true)
+      setNwcMessage('NWC URI generated! Connect to Primal for private notifications. Receive BCH tips and get alerted—use to tip others via npub. (NIP-XX proposal for full on-chain support coming.)')
+    } catch (err) {
+      setError('NWC generation failed: ' + err.message)
     }
   }
 
@@ -135,7 +149,7 @@ function Popup() {
           checked={notify}
           onChange={e => setNotify(e.target.checked)}
         />
-        Notify recipient via public Nostr note
+        Notify recipient (via NWC if connected, else public note)
       </label>
       <button onClick={handleTip} disabled={!bchBalance || bchBalance < 546 || loading}>
         {loading ? 'Tipping...' : 'Send Tip'}
@@ -152,6 +166,13 @@ function Popup() {
           </pre>
         </div>
       )}
+      {/* New NWC Section */}
+      <h2>NWC Integration</h2>
+      <button onClick={handleGenerateNwc}>Generate NWC URI for Primal</button>
+      {nwcUri && <div>NWC URI: {nwcUri} <button onClick={() => navigator.clipboard.writeText(nwcUri)}>Copy</button></div>}
+      {showNwcQr && nwcUri && <QRCodeSVG value={nwcUri} size={128} level="H" style={{margin: '10px 0'}} />}
+      <p style={{fontSize: 'small'}}>Connect to Primal for private BCH tip notifications. Receive tips and get alerted to tip others with BCH via npub. (NIP-XX proposal for on-chain support pending—beta testing!)</p>
+      {nwcMessage && <div style={{color: 'blue'}}>{nwcMessage}</div>} {/* Educational banner */}
     </div>
   )
 }

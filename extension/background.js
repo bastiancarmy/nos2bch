@@ -3,7 +3,7 @@
 // background.js
 
 import browser from 'webextension-polyfill'
-import {getPublicKey, finalizeEvent, verifyEvent} from 'nostr-tools/pure'
+import {getPublicKey, finalizeEvent, verifyEvent, generateSecretKey} from 'nostr-tools/pure'
 import {nip04, nip19} from 'nostr-tools'
 import * as nip44 from 'nostr-tools/nip44'
 import { LRUCache } from './utils'
@@ -23,7 +23,8 @@ import {
   signSchnorr,
   bytesToNumberBE,
   numberToBytesBE,
-  _hash160
+  _hash160,
+  getTxHistory // For monitoring
 } from './common';
 import * as secp from '@noble/secp256k1'
 import { sha256 } from '@noble/hashes/sha256'
@@ -90,7 +91,7 @@ function releasePromptMutex() {
   promptMutex = false
 }
 async function handleContentScriptMessage({type, params, host}) {
-  if (NO_PERMISSIONS_REQUIRED[type]) {
+  if (NO_PERMISSIONS_REQUIRED[type] || type === 'generateNWCConnection') { // Added for internal
     switch (type) {
       case 'replaceURL': {
         let {protocol_handler: ph} = await browser.storage.local.get([
@@ -122,6 +123,9 @@ async function handleContentScriptMessage({type, params, host}) {
           result = result.replace(new RegExp(`{ *${pattern} *}`, 'g'), value || '')
         })
         return result
+      }
+      case 'generateNWCConnection': {
+        return await generateNWCConnection(); // Direct call
       }
     }
     return
@@ -269,6 +273,7 @@ async function performOperation(type, params) {
         });
       
         let attempts = 3;
+        let txid;
         while (attempts > 0) {
           try {
             let feeRate;
@@ -382,33 +387,8 @@ async function performOperation(type, params) {
             const encodedTx = encodeTx(unsignedTx);
             const txHex = bytesToHex(encodedTx);
             console.log('Built txHex for broadcast:', txHex);
-            const txid = await broadcastTx(txHex);
-      
-            // If notify is true, send a Nostr kind:1 note to the recipient
-            if (notify) {
-              const event = {
-                kind: 1,
-                created_at: Math.floor(Date.now() / 1000),
-                tags: [['p', recipientPk]],
-                content: `Tipped you ${amountSat} sats on Bitcoin Cash! Transaction: https://blockchair.com/bitcoin-cash/transaction/${txid}`
-              };
-              const skHex = bytesToHex(skBytes); // Convert to hex for nostr-tools
-              const signed = finalizeEvent(event, skHex);
-              if (!verifyEvent(signed)) throw new Error('Failed to verify tipped notification event');
-              console.log('Signed notification event:', JSON.stringify(signed, null, 2)); // Debug
-              const relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.mom'];
-              for (const relay of relays) {
-                try {
-                  await publishToRelay(relay, signed);
-                  console.log(`Notification published to ${relay}`);
-                } catch (err) {
-                  console.warn(`Failed to publish to ${relay}:`, err);
-                }
-              }
-            }
-      
-            chrome.alarms.clear('tipKeepAlive');
-            return { txid };
+            txid = await broadcastTx(txHex);
+            break; // Success, exit loop
           } catch (error) {
             console.error('Tip attempt failed:', error);
             attempts--;
@@ -419,6 +399,43 @@ async function performOperation(type, params) {
             }
           }
         }
+      
+        chrome.alarms.clear('tipKeepAlive');
+        // If notify, use NWC notification if connected, fallback to kind:1
+        if (notify) {
+          const { nwcConnections = [] } = await browser.storage.local.get('nwcConnections');
+          const conn = nwcConnections.find(c => c.clientPubkey === recipientPk); // Assume recipient connected
+          if (conn) {
+            await sendNotification(conn, 'payment_received', {
+              type: 'incoming',
+              state: 'settled',
+              amount: amountSat * 1000, // msats
+              settled_at: Math.floor(Date.now() / 1000),
+              metadata: { txid, note: 'Received BCH tip! To use, connect nos2bch extension via NWC for on-chain tips. (NIP-XX proposal for full on-chain support pending—beta testing!)' } // Educate
+            });
+          } else {
+            // Fallback to kind:1 (public)
+            const event = {
+              kind: 1,
+              created_at: Math.floor(Date.now() / 1000),
+              tags: [['p', recipientPk]],
+              content: `Tipped you ${amountSat} sats on Bitcoin Cash! Transaction: https://blockchair.com/bitcoin-cash/transaction/${txid}. Install nos2bch extension to tip others with BCH via npub. (NIP-XX proposal for on-chain support pending—beta testing!)`
+            };
+            const skHex = bytesToHex(skBytes);
+            const signed = finalizeEvent(event, skHex);
+            if (!verifyEvent(signed)) throw new Error('Failed to verify tipped notification event');
+            console.log('Signed notification event:', JSON.stringify(signed, null, 2));
+            for (const relay of defaultRelays) {
+              try {
+                await publishToRelay(relay, signed);
+                console.log(`Fallback notification published to ${relay}`);
+              } catch (err) {
+                console.warn(`Failed to publish fallback to ${relay}:`, err);
+              }
+            }
+          }
+        }
+        return { txid };
       }
     }
   } catch (error) {
@@ -546,4 +563,163 @@ function encodeTx(tx) {
   );
 }
 
+// NWC Helpers
+async function generateNWCConnection(relay = 'wss://relay.damus.io') {
+  const walletSecretBytes = generateSecretKey(); // Wallet service sk (per connection)
+  const walletSecretHex = bytesToHex(walletSecretBytes);
+  const walletPubkey = getPublicKey(walletSecretBytes);
+  const clientSecretBytes = generateSecretKey(); // Random for client to use as sk
+  const clientSecretHex = bytesToHex(clientSecretBytes);
+  const id = Math.random().toString(36).slice(2);
+  const connection = {
+    id,
+    walletPubkey,
+    walletSecret: walletSecretHex,
+    relay,
+    permissions: { methods: ['pay_onchain', 'get_balance'], budget: { maxSat: 100000, period: 'daily' } },
+    clientPubkey: null // Store on first request
+  };
+  const { nwcConnections = [] } = await browser.storage.local.get('nwcConnections');
+  nwcConnections.push(connection);
+  await browser.storage.local.set({ nwcConnections });
+  return `nostr+walletconnect://${walletPubkey}?relay=${encodeURIComponent(relay)}&secret=${clientSecretHex}`;
+}
+
+async function publishInfoEvent(connection) {
+  const event = {
+    kind: 13194,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [
+      ['encryption', 'nip44_v2 nip04'],
+      ['notifications', 'payment_received payment_sent']
+    ],
+    content: 'pay_onchain make_onchain_invoice get_balance get_info notifications' // Custom + standards
+  };
+  const signed = finalizeEvent(event, hexToBytes(connection.walletSecret)); // Use wallet sk
+  await publishToRelay(connection.relay, signed);
+}
+// Call for each connection on startup
+browser.runtime.onStartup.addListener(async () => {
+  const { nwcConnections } = await browser.storage.local.get('nwcConnections');
+  if (nwcConnections) nwcConnections.forEach(publishInfoEvent);
+});
+
+async function startNWCListener() {
+  const { nwcConnections = [] } = await browser.storage.local.get('nwcConnections');
+  if (!nwcConnections.length) return;
+  const relays = [...new Set(nwcConnections.map(c => c.relay))];
+  for (const relayUrl of relays) {
+    const ws = new WebSocket(relayUrl);
+    ws.onopen = () => {
+      const subId = Math.random().toString(36).slice(2);
+      ws.send(JSON.stringify(['REQ', subId, { kinds: [23194], '#p': nwcConnections.map(c => c.walletPubkey) }]));
+    };
+    ws.onmessage = async (msg) => {
+      const data = JSON.parse(msg.data);
+      if (data[0] === 'EVENT' && data[1] === subId) {
+        await handleNWCRequest(data[2], nwcConnections);
+      }
+    };
+    // Reconnect on close/error
+    ws.onclose = ws.onerror = () => setTimeout(startNWCListener, 5000);
+  }
+}
+
+async function handleNWCRequest(event, connections) {
+  if (!verifyEvent(event)) return; // Validate
+  const conn = connections.find(c => event.tags.find(t => t[0] === 'p' && t[1] === c.walletPubkey));
+  if (!conn) return;
+  // Check expiration tag (unix timestamp)
+  const expTag = event.tags.find(t => t[0] === 'expiration')?.[1];
+  if (expTag && parseInt(expTag) < Math.floor(Date.now() / 1000)) return; // Ignore expired
+  const encTag = event.tags.find(t => t[0] === 'encryption')?.[1] || 'nip04';
+  const decryptFn = encTag === 'nip44_v2' ? nip44.v2.decrypt : nip04.decrypt;
+  const payload = JSON.parse(decryptFn(event.content, conn.walletSecret, event.pubkey)); // walletSecret hex, event.pubkey is client_pk
+  const { method, params } = payload;
+  // Store client pubkey on first request
+  if (!conn.clientPubkey) {
+    conn.clientPubkey = event.pubkey;
+    await browser.storage.local.set({ nwcConnections: connections }); // Update storage
+  }
+  let result, error;
+  try {
+    if (!conn.permissions.methods.includes(method)) throw new Error('RESTRICTED');
+    // Budget check (simple daily max example)
+    const spentKey = `spent_${conn.id}_${new Date().toDateString()}`;
+    const { [spentKey]: spent = 0 } = await browser.storage.local.get(spentKey);
+    if (params.amountSat && spent + params.amountSat > conn.permissions.budget.maxSat) throw new Error('QUOTA_EXCEEDED');
+    switch (method) {
+      case 'pay_onchain':
+        const { txid } = await performOperation('tipBCH', { ...params, notify: false });
+        result = { txid, chain: 'bch' };
+        // Update spent
+        await browser.storage.local.set({ [spentKey]: spent + params.amountSat });
+        await sendNotification(conn, 'payment_sent', { type: 'outgoing', state: 'settled', amount: params.amountSat * 1000, settled_at: Math.floor(Date.now() / 1000), metadata: { txid, note: 'Sent BCH tip! Recipient will be notified if connected via NWC. Proposal for NIP-XX on-chain notifications pending.' } }); // Educate
+        break;
+      case 'make_onchain_invoice': // Custom: { amount }
+        const sk = (await browser.storage.local.get('private_key')).private_key;
+        const pubHex = getPublicKey(sk);
+        const address = deriveBCHAddress(pubHex);
+        result = { address, chain: 'bch', amount: params.amount * 1000 }; // msats
+        break;
+      case 'get_balance':
+        const balanceSat = await getBCHBalance(); // From common.js
+        result = { balance: balanceSat * 1000 }; // msats
+        break;
+      case 'pay_invoice': // Standard Lightning – error for BCH
+        error = { code: 'NOT_IMPLEMENTED', message: 'BCH on-chain only – use pay_onchain with recipientNpub for Nostr tips. Proposal for NIP-XX to add on-chain support.' }; // Educate on proposal
+        break;
+      // Add others: lookup_invoice, list_transactions (adapt to BCH tx history)
+      default:
+        error = { code: 'NOT_IMPLEMENTED', message: 'Custom method not supported yet—proposing NIP-XX for BCH on-chain integration.' }; // Highlight for proposal
+    }
+  } catch (err) {
+    error = { code: err.message === 'QUOTA_EXCEEDED' ? 'QUOTA_EXCEEDED' : 'INTERNAL', message: err.message + ' (NIP-XX needed for better error handling in on-chain wallets)' }; // Educate
+  }
+  // Response encryption: walletSecret + client_pk (event.pubkey)
+  const encryptFn = encTag === 'nip44_v2' ? nip44.v2.encrypt : nip04.encrypt;
+  const encrypted = encryptFn(JSON.stringify({ result_type: method, result: error ? null : result, error }), conn.walletSecret, event.pubkey);
+  const responseEvent = finalizeEvent({
+    kind: 23195,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [['p', event.pubkey], ['e', event.id]],
+    content: encrypted
+  }, hexToBytes(conn.walletSecret));
+  await publishToRelay(conn.relay, responseEvent);
+}
+
+async function sendNotification(conn, type, data) {
+  if (!conn.clientPubkey) return; // No client yet
+  const payload = { notification_type: type, notification: data };
+  const encrypted = nip44.v2.encrypt(JSON.stringify(payload), conn.walletSecret, conn.clientPubkey); // walletSecret + client_pk
+  const event = finalizeEvent({
+    kind: 23197,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [['p', conn.clientPubkey]],
+    content: encrypted
+  }, hexToBytes(conn.walletSecret));
+  await publishToRelay(conn.relay, event);
+  // Legacy: If supporting NIP-04, duplicate as 23196 with nip04.encrypt
+}
+
+// Tx Monitoring (poll every minute for new txs)
+let lastTxHistory = {}; // {address: [{hash, time, balance_change}]}
+setInterval(async () => {
+  const { private_key: sk } = await browser.storage.local.get('private_key');
+  if (!sk) return;
+  const pubHex = getPublicKey(sk);
+  const address = deriveBCHAddress(pubHex).toLowerCase();
+  const history = await getTxHistory(address); // From common.js
+  const prev = lastTxHistory[address] || [];
+  const newTxs = history.filter(tx => !prev.some(p => p.hash === tx.hash && tx.balance_change > 0)); // Incoming only
+  if (newTxs.length) {
+    const { nwcConnections = [] } = await browser.storage.local.get('nwcConnections');
+    newTxs.forEach(tx => {
+      nwcConnections.forEach(conn => sendNotification(conn, 'payment_received', { type: 'incoming', state: 'settled', amount: tx.balance_change * 100000000 * 1000, settled_at: tx.time, metadata: { hash: tx.hash, note: 'Received BCH tip! To tip others, connect nos2bch via NWC. Proposal for NIP-XX to standardize on-chain notifications.' } })); // Educate
+    });
+  }
+  lastTxHistory[address] = history;
+}, 60000); // 1 min
+
+startNWCListener(); // On load
 console.log('Background script loaded successfully');
