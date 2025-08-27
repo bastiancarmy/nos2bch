@@ -1,4 +1,3 @@
-// extension/popup.jsx - Added try/catch for derive errors; no other changes.
 import {getPublicKey} from 'nostr-tools'
 import * as nip19 from 'nostr-tools/nip19'
 import {hexToBytes} from '@noble/hashes/utils'
@@ -29,6 +28,8 @@ function Popup() {
   const [loading, setLoading] = useState(false)
   const [balanceLoading, setBalanceLoading] = useState(true)
   const [result, setResult] = useState(null)  // New state for result
+  const [copiedNpub, setCopiedNpub] = useState(false)
+  const [copiedBCH, setCopiedBCH] = useState(false)
 
   useEffect(() => {
     (async () => {
@@ -103,15 +104,31 @@ function Popup() {
 
   const formattedBalance = bchBalance !== null ? bchBalance.toLocaleString() + ' sats' : ''
   const formattedBCH = bchBalance !== null ? `(${(bchBalance / 100000000).toFixed(8)} BCH)` : ''
-  const shortenedNpub = npub ? `${npub.slice(0, 10)}...${npub.slice(-10)}` : ''
+  const abbreviate = (str) => `${str.slice(0, 6)}...${str.slice(-6)}`
 
   return (
     <div style={{ padding: '10px', width: '300px' }}>
       <h1>nos2bch</h1>
-      {npub && <div>Npub: {shortenedNpub}</div>}
-      {npub && <QRCodeSVG value={npub.toUpperCase()} size={128} level="H" style={{margin: '10px 0'}} />}
-      {bchAddress && <div>BCH Address: {bchAddress}</div>}
-      <div>Balance: {balanceLoading ? 'Loading...' : `${formattedBalance} ${formattedBCH}`}</div>
+      {npub && (
+        <div style={{display: 'flex', alignItems: 'center', gap: '10px'}}>
+          <div>Npub: {abbreviate(npub)}</div>
+          <button onClick={() => {navigator.clipboard.writeText(npub); setCopiedNpub(true); setTimeout(() => setCopiedNpub(false), 2000);}} aria-label="Copy npub">
+            {copiedNpub ? 'Copied!' : 'Copy'}
+          </button>
+          <QRCodeSVG value={npub.toUpperCase()} size={128} level="H" />
+        </div>
+      )}
+      {bchAddress && (
+        <div style={{display: 'flex', alignItems: 'center', gap: '10px'}}>
+          <div>BCH Address: {abbreviate(bchAddress)}</div>
+          <button onClick={() => {navigator.clipboard.writeText(bchAddress); setCopiedBCH(true); setTimeout(() => setCopiedBCH(false), 2000);}} aria-label="Copy BCH Address">
+            {copiedBCH ? 'Copied!' : 'Copy'}
+          </button>
+          <QRCodeSVG value={bchAddress.toUpperCase()} size={128} level="H" />
+        </div>
+      )}
+      <div>Balance: {balanceLoading ? <span>Loading... <span className="spinner" /></span> :
+        (bchBalance !== null ? `${formattedBalance} ${formattedBCH}` : 'Error - <button onClick={() => refreshBalance(bchAddress)}>Retry</button>')}</div>
       {bchBalance === 0 && <div style={{color: 'red'}}>Zero balance - fund your address to tip</div>}
       {bchBalance > 0 && bchBalance < 546 && <div style={{color: 'orange'}}>Dust balance - add more funds to tip</div>}
       <h2>Tip BCH</h2>
@@ -129,13 +146,13 @@ function Popup() {
         onChange={e => setAmountSat(e.target.value)}
         style={{width: '100%', marginBottom: '5px'}}
       />
-      <label style={{display: 'flex', alignItems: 'center', marginBottom: '5px'}}>
+      <label style={{fontSize: 'small', display: 'flex', alignItems: 'center', marginBottom: '5px'}}>
         <input
           type="checkbox"
           checked={notify}
           onChange={e => setNotify(e.target.checked)}
         />
-        Notify recipient via public Nostr note
+        Notify recipient via encrypted DM (kind 4)
       </label>
       <button onClick={handleTip} disabled={!bchBalance || bchBalance < 546 || loading}>
         {loading ? 'Tipping...' : 'Send Tip'}
