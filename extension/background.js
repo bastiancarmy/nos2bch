@@ -383,6 +383,12 @@ async function performOperation(type, params) {
             const txHex = bytesToHex(encodedTx);
             console.log('Built txHex for broadcast:', txHex);
             const txid = await broadcastTx(txHex);
+            browser.notifications.create({
+              type: 'basic',
+              iconUrl: browser.runtime.getURL('icon-128.png'), // Assuming you have an icon
+              title: 'Tip Sent Successfully!',
+              message: `Sent ${amountSat} sats to ${recipientNpub}. TxID: ${txid}\nView: https://blockchair.com/bitcoin-cash/transaction/${txid}`
+            });
       
             // If notify is true, send a Nostr kind:4 DM to the recipient
             if (notify) {
