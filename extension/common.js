@@ -199,20 +199,22 @@ export function _encodeDer(r, s) {
 
 export async function getBCHBalance(address, inSats = false) {
   address = address.toLowerCase();
-  const client = await connectElectrum();
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let server of ELECTRUM_SERVERS) {
     try {
-      const balance = await client.request('blockchain.scripthash.get_balance', addressToScripthash(address));
+      const client = await connectElectrum(server); // Assuming connectElectrum accepts server object
+      const balancePromise = client.request('blockchain.scripthash.get_balance', addressToScripthash(address));
+      const balance = await Promise.race([balancePromise, new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), 5000))]);
       const totalSats = balance.confirmed + balance.unconfirmed;
+      await browser.storage.local.set({cachedBalance: totalSats, cachedTime: Date.now()}); // Cache
       return inSats ? totalSats : totalSats / 100000000;
     } catch (err) {
-      console.error(`Electrum balance fetch attempt ${attempt} failed:`, err);
-      if (attempt === 3) {
-        console.error('Electrum balance fetch failed after retries:', err);
-        return 0;
-      }
+      console.error(`Electrum balance fetch failed on ${server.host}:`, err);
     }
   }
+  // Fallback to cache if all fail
+  const {cachedBalance, cachedTime} = await browser.storage.local.get(['cachedBalance', 'cachedTime']);
+  if (cachedTime && Date.now() - cachedTime < 60000) return inSats ? cachedBalance : cachedBalance / 100000000;
+  return 0;
 }
 
 export async function getTxHistory(address) {
