@@ -122,10 +122,11 @@ function Popup() {
           <QRCodeSVG value={bchAddress.toUpperCase()} size={128} level="H" />
         </div>
       )}
-      <div>Balance: {balanceLoading ? 'Loading...' : `${formattedBalance} ${formattedBCH}`}</div>
-      <button onClick={() => refreshBalance(bchAddress, true)} disabled={balanceLoading}>Refresh Balance</button>
-      {bchBalance === 0 && <div style={{color: 'red'}}>Zero balance - fund your address to tip</div>}
-      {bchBalance > 0 && bchBalance < 546 && <div style={{color: 'orange'}}>Dust balance - add more funds to tip</div>}
+      <div>
+        BCH Balance: {balanceLoading ? <span>Loading... <span className="spinner" /></span> :
+          (bchBalance !== null ? `${formattedBalance} ${formattedBCH ? `(${formattedBCH})` : ''}` : 'Error - <button onClick={() => refreshBalanceWithBackoff(bchAddress)}>Retry</button>')}
+        {bchBalance !== null && cachedTimestamp && <div>Last updated: {Math.floor((Date.now() - cachedTimestamp) / 60000)} min ago</div>}
+      </div>
       <h2>Tip BCH</h2>
       <input
         type="text"
