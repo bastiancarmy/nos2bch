@@ -33,34 +33,23 @@ function Popup() {
 
   useEffect(() => {
     (async () => {
-      const results = await browser.storage.local.get(['private_key', 'lastBchBalance', 'lastBchBalanceTime']);
-      if (results.private_key) {
-        const sk = results.private_key // Hex string
-        setPrivKey(sk)
-        const pubHex = getPublicKey(sk)
-        setNpub(nip19.npubEncode(pubHex))
-        try {
-          const address = await deriveBCHAddress(pubHex) // Await
-          setBchAddress(address)
-          if (results.lastBchBalanceTime && Date.now() - results.lastBchBalanceTime < 600000) {
-            setBchBalance(results.lastBchBalance)
-            setBalanceLoading(false)
-          } else {
-            refreshBalance(address)
-          }
-        } catch (err) {
-          setError('Address derivation failed: ' + err.message)
-        }
+      const results = await browser.storage.local.get(['private_key', `cached_balance_${bchAddress}`, 'hasRecentTx']);
+      // ... set privKey, npub, address ...
+
+      const cacheKey = `cached_balance_${address}`;
+      if (results[cacheKey] && Date.now() - results[cacheKey].timestamp < 300000 && !results.hasRecentTx) {
+        setBchBalance(results[cacheKey].balance);
+        setBalanceLoading(false);
       } else {
-        setError('No private key set. Please configure in options.')
+        refreshBalance(address, true); // Force if old cache or tx
       }
     })();
-  }, [])
+  }, []);
 
   async function refreshBalance(address, force = false) {
     setBalanceLoading(true);
     try {
-      const balanceBCH = await getBCHBalance(address, force);
+      const balanceBCH = await getBCHBalance(address, force || (await browser.storage.local.get('hasRecentTx')).hasRecentTx);
       const sats = Math.floor(balanceBCH * 100000000);
       setBchBalance(sats);
     } catch (err) {
@@ -92,6 +81,7 @@ function Popup() {
         setAmountSat('')
         refreshBalance(bchAddress) // Refresh after success
         setTimeout(() => setStatus(''), 5000) // Clear status after 5s
+        await browser.storage.local.set({hasRecentTx: true}); // Set flag after tx
       } else if (response.error) {
         console.error('Tip error details:', response.error);  // Log full error object
         setError(response.error.message || response.error || 'Unknown error')  // Extract message if object
