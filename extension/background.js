@@ -580,3 +580,33 @@ function encodeTx(tx) {
 }
 
 console.log('Background script loaded successfully');
+
+// Background balance refresh alarm
+chrome.alarms.create('backgroundBalanceRefresh', { periodInMinutes: 10 });
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'backgroundBalanceRefresh') {
+    const { private_key: privKey } = await browser.storage.local.get('private_key');
+    if (privKey) {
+      const pub = getPublicKey(privKey);
+      const bchAddress = deriveBCHAddress(pub);
+      const currentBalance = await getBCHBalance(bchAddress); // Uses cache internally if fresh
+      if (currentBalance !== null) {
+        // Compare with last known cache to detect change
+        const cached = await getCachedBalance();
+        if (cached !== currentBalance) {
+          browser.storage.local.set({ cachedBalance: { balance: currentBalance, timestamp: Date.now() } });
+          // Optional: Notify user of incoming funds
+          const hasPermission = await browser.permissions.contains({ permissions: ['notifications'] });
+          if (hasPermission) {
+            browser.notifications.create({
+              type: 'basic',
+              iconUrl: browser.runtime.getURL('icon-128.png'),
+              title: 'nos2bch: Balance Updated',
+              message: `Your BCH balance has changed to ${currentBalance} sats.`
+            });
+          }
+        }
+      }
+    }
+  }
+});
