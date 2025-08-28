@@ -50,7 +50,7 @@ function Options() {
   }, [messages, setMessages])
   useEffect(() => {
     (async () => {
-      const results = await browser.storage.local.get(['private_key', 'protocol_handler', 'notifications', 'lastBchBalance', 'lastBchBalanceTime', 'hasRecentTx']);
+      const results = await browser.storage.local.get(['private_key', 'protocol_handler', 'notifications', 'lastBchBalance', 'lastBchBalanceTime']);
       console.log('Options storage loaded:', results);
       if (results.private_key) {
         let prvKey = results.private_key
@@ -61,7 +61,7 @@ function Options() {
           let pubHex = getPublicKey(prvKey)
           const address = await deriveBCHAddress(pubHex)
           setBchAddress(address)
-          if (results.lastBchBalanceTime && Date.now() - results.lastBchBalanceTime < 600000 && !results.hasRecentTx) {
+          if (results.lastBchBalanceTime && Date.now() - results.lastBchBalanceTime < 600000) {
             setBchBalance(results.lastBchBalance)
           } else {
             refreshBalance(address)
@@ -93,6 +93,7 @@ function Options() {
   useEffect(() => {
     loadPermissions()
   }, [])
+
   async function loadPermissions() {
     let {policies = {}} = await browser.storage.local.get('policies')
     let list = []
@@ -111,6 +112,7 @@ function Options() {
     })
     setPolicies(list)
   }
+
   async function refreshBalance(address) {
     if (!address) return
     setBalanceLoading(true)
@@ -126,6 +128,7 @@ function Options() {
       setBalanceLoading(false)
     }
   }
+
   async function hideAndResetKeyInput() {
     setPrivKeyInput(privKey)
     hidePrivateKey(true)
