@@ -8,6 +8,7 @@ function Prompt() {
   let [type, setType] = useState('')
   let [params, setParams] = useState(null)
   let [isSuccess, setIsSuccess] = useState(false)
+  let [loading, setLoading] = useState(false)
 
   useEffect(() => {
     browser.runtime.sendMessage({getPrompt: true}).then(prompt => {
@@ -20,6 +21,7 @@ function Prompt() {
   }, [])
 
   function respond(accept, conditions = null) {
+    setLoading(true)
     if (accept === 'true' || accept === 'forever') {
       setIsSuccess(true)
       setTimeout(() => {
@@ -43,9 +45,9 @@ function Prompt() {
   return (
     <div style={{padding: '10px'}}>
       <div>{message}</div>
-      <button onClick={() => respond('true')}>Yes</button>
-      <button onClick={() => respond('false')}>No</button>
-      <button onClick={() => respond('forever')}>Always</button>
+      <button onClick={() => respond('true')} disabled={loading || isSuccess}>Yes</button>
+      <button onClick={() => respond('false')} disabled={loading || isSuccess}>No</button>
+      <button onClick={() => respond('forever')} disabled={loading || isSuccess}>Always</button>
       {isSuccess && (
         <div style={{textAlign: 'center', padding: '20px', background: '#d4edda', color: '#155724', borderRadius: '8px', margin: '10px 0'}}>
           <span style={{fontSize: '24px'}}>✔️</span> Tip sent successfully!

@@ -269,6 +269,7 @@ async function performOperation(type, params) {
         });
       
         let attempts = 3;
+        let txid; // Store successful txid outside loop
         while (attempts > 0) {
           try {
             let feeRate;
@@ -382,13 +383,8 @@ async function performOperation(type, params) {
             const encodedTx = encodeTx(unsignedTx);
             const txHex = bytesToHex(encodedTx);
             console.log('Built txHex for broadcast:', txHex);
-            const txid = await broadcastTx(txHex);
-            browser.notifications.create({
-              type: 'basic',
-              iconUrl: browser.runtime.getURL('icon-128.png'), // Assuming you have an icon
-              title: 'Tip Sent Successfully!',
-              message: `Sent ${amountSat} sats to ${recipientNpub}. TxID: ${txid}\nView: https://blockchair.com/bitcoin-cash/transaction/${txid}`
-            });
+            txid = await broadcastTx(txHex); // Assign txid on success
+            console.log('Broadcast successful, txid:', txid);
       
             // If notify is true, send a Nostr kind:4 DM to the recipient
             if (notify) {
@@ -404,15 +400,27 @@ async function performOperation(type, params) {
               const signed = finalizeEvent(event, skHex);
               if (!verifyEvent(signed)) throw new Error('Failed to verify tipped notification event');
               console.log('Signed notification event:', JSON.stringify(signed, null, 2)); // Debug
-              const relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.mom'];
+              const relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr-pub.wellorder.net'];
               for (const relay of relays) {
                 try {
                   await publishToRelay(relay, signed);
                   console.log(`Notification published to ${relay}`);
                 } catch (err) {
-                  console.warn(`Failed to publish to ${relay}:`, err);
+                  console.warn(`Failed to publish to ${relay}:`, err); // Warn but don't throw
                 }
               }
+            }
+      
+            // Wrap notifications in try-catch to prevent throw/retry on failure
+            try {
+              browser.notifications.create({
+                type: 'basic',
+                iconUrl: browser.runtime.getURL('icon-128.png'), // Assuming you have an icon
+                title: 'Tip Sent Successfully!',
+                message: `Sent ${amountSat} sats to ${recipientNpub}. TxID: ${txid}\nView: https://blockchair.com/bitcoin-cash/transaction/${txid}`
+              });
+            } catch (notifErr) {
+              console.warn('System notification failed:', notifErr); // Log warning, continue
             }
       
             chrome.alarms.clear('tipKeepAlive');

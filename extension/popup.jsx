@@ -1,3 +1,4 @@
+// extension/popup.jsx - Merged improvements
 import {getPublicKey} from 'nostr-tools'
 import * as nip19 from 'nostr-tools/nip19'
 import {hexToBytes} from '@noble/hashes/utils'
@@ -33,7 +34,7 @@ function Popup() {
 
   useEffect(() => {
     (async () => {
-      const results = await browser.storage.local.get(['private_key']);
+      const results = await browser.storage.local.get(['private_key', 'lastBchBalance', 'lastBchBalanceTime']);
       if (results.private_key) {
         const sk = results.private_key // Hex string
         setPrivKey(sk)
@@ -42,7 +43,12 @@ function Popup() {
         try {
           const address = await deriveBCHAddress(pubHex) // Await
           setBchAddress(address)
-          refreshBalance(address)
+          if (results.lastBchBalanceTime && Date.now() - results.lastBchBalanceTime < 600000) {
+            setBchBalance(results.lastBchBalance)
+            setBalanceLoading(false)
+          } else {
+            refreshBalance(address)
+          }
         } catch (err) {
           setError('Address derivation failed: ' + err.message)
         }
@@ -58,7 +64,9 @@ function Popup() {
       const balanceBCH = await getBCHBalance(address)
       const sats = Math.floor(balanceBCH * 100000000)
       setBchBalance(sats)
+      await browser.storage.local.set({lastBchBalance: sats, lastBchBalanceTime: Date.now()})
     } catch (err) {
+      console.error('Balance fetch error in popup:', err) // Log for debugging
       setBchBalance(0)
       setError('Error loading balance: ' + err.message)
     } finally {
