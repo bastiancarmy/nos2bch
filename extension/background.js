@@ -1,7 +1,3 @@
-// extension/background.js
-
-// background.js
-
 import browser from 'webextension-polyfill'
 import {getPublicKey, finalizeEvent, verifyEvent} from 'nostr-tools/pure'
 import {nip04, nip19} from 'nostr-tools'
@@ -89,6 +85,9 @@ function acquirePromptMutex() {
 function releasePromptMutex() {
   promptMutex = false
 }
+
+let promptTabId = null; // Global to track prompt tab for sending result
+
 async function handleContentScriptMessage({type, params, host}) {
   if (NO_PERMISSIONS_REQUIRED[type]) {
     switch (type) {
@@ -154,18 +153,24 @@ async function handleContentScriptMessage({type, params, host}) {
           params: JSON.stringify(params),
           type
         })
-        if (sideEffectTypes.has(type)) {
-          const {top, left} = await getPosition(width, height)
+        if (sideEffectTypes.has(type) && host === 'nos2bch') {
+          // For extension-initiated tips, assume confirmed inline, perform directly
+          finalResult = await performOperation(type, params);
+          // No need for prompt window
+        } else if (sideEffectTypes.has(type)) {
+          const {top, left}= await getPosition(width, height)
+          let win = await browser.windows.create({
+            url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
+            type: 'popup',
+            width: width,
+            height: height,
+            top: top,
+            left: left
+          })
+          let tabs = await browser.tabs.query({ windowId: win.id });
+          promptTabId = tabs[0].id;
           let {accept, conditions} = await new Promise((resolve, reject) => {
             openPrompt = {resolve, reject}
-            browser.windows.create({
-              url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
-              type: 'popup',
-              width: width,
-              height: height,
-              top: top,
-              left: left
-            })
           })
           if (!accept) {
             releasePromptMutex()
@@ -178,23 +183,30 @@ async function handleContentScriptMessage({type, params, host}) {
           if (typeof finalResult === 'string') {
             qs.set('result', finalResult)
           }
-          const {top, left} = await getPosition(width, height)
+          const {top, left}= await getPosition(width, height)
+          let win = await browser.windows.create({
+            url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
+            type: 'popup',
+            width: width,
+            height: height,
+            top: top,
+            left: left
+          })
+          let tabs = await browser.tabs.query({ windowId: win.id });
+          promptTabId = tabs[0].id;
           let {accept, conditions} = await new Promise((resolve, reject) => {
             openPrompt = {resolve, reject}
-            browser.windows.create({
-              url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
-              type: 'popup',
-              width: width,
-              height: height,
-              top: top,
-              left: left
-            })
           })
           if (!accept) {
             releasePromptMutex()
             return {error: {message: 'denied'}}
           }
           if (conditions) await updatePermission(host, type, accept, conditions)
+        }
+        // Send result to prompt tab if open
+        if (promptTabId) {
+          browser.tabs.sendMessage(promptTabId, { tipResult: finalResult });
+          promptTabId = null; // Reset
         }
       } catch (err) {
         releasePromptMutex()
@@ -413,12 +425,17 @@ async function performOperation(type, params) {
       
             // Wrap notifications in try-catch to prevent throw/retry on failure
             try {
-              browser.notifications.create({
-                type: 'basic',
-                iconUrl: browser.runtime.getURL('icon-128.png'), // Assuming you have an icon
-                title: 'Tip Sent Successfully!',
-                message: `Sent ${amountSat} sats to ${recipientNpub}. TxID: ${txid}\nView: https://blockchair.com/bitcoin-cash/transaction/${txid}`
-              });
+              const hasPermission = await browser.permissions.contains({ permissions: ['notifications'] });
+              if (hasPermission) {
+                browser.notifications.create({
+                  type: 'basic',
+                  iconUrl: browser.runtime.getURL('icon-128.png'), // Assuming you have an icon
+                  title: 'Tip Sent Successfully!',
+                  message: `Sent ${amountSat} sats to ${recipientNpub}. TxID: ${txid}\nView: https://blockchair.com/bitcoin-cash/transaction/${txid}`
+                });
+              } else {
+                console.log('Notifications permission not granted; skipping system notification.');
+              }
             } catch (notifErr) {
               console.warn('System notification failed:', notifErr); // Log warning, continue
             }

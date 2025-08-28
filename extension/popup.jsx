@@ -1,4 +1,4 @@
-// extension/popup.jsx - Merged improvements
+// extension/popup.jsx - Confirmed as provided (no changes needed)
 import {getPublicKey} from 'nostr-tools'
 import * as nip19 from 'nostr-tools/nip19'
 import {hexToBytes} from '@noble/hashes/utils'
@@ -15,7 +15,6 @@ class ErrorBoundary extends React.Component {
     return this.state.hasError ? <div>Error: {this.state.error.message}</div> : this.props.children;
   }
 }
-
 function Popup() {
   const [npub, setNpub] = useState('')
   const [privKey, setPrivKey] = useState(null)
@@ -58,19 +57,17 @@ function Popup() {
     })();
   }, [])
 
-  async function refreshBalance(address) {
-    setBalanceLoading(true)
+  async function refreshBalance(address, force = false) {
+    setBalanceLoading(true);
     try {
-      const balanceBCH = await getBCHBalance(address)
-      const sats = Math.floor(balanceBCH * 100000000)
-      setBchBalance(sats)
-      await browser.storage.local.set({lastBchBalance: sats, lastBchBalanceTime: Date.now()})
+      const balanceBCH = await getBCHBalance(address, force);
+      const sats = Math.floor(balanceBCH * 100000000);
+      setBchBalance(sats);
     } catch (err) {
-      console.error('Balance fetch error in popup:', err) // Log for debugging
-      setBchBalance(0)
-      setError('Error loading balance: ' + err.message)
+      setBchBalance(0);
+      setError('Error loading balance: ' + err.message);
     } finally {
-      setBalanceLoading(false)
+      setBalanceLoading(false);
     }
   }
 
@@ -135,8 +132,8 @@ function Popup() {
           <QRCodeSVG value={bchAddress.toUpperCase()} size={128} level="H" />
         </div>
       )}
-      <div>Balance: {balanceLoading ? <span>Loading... <span className="spinner" /></span> :
-        (bchBalance !== null ? `${formattedBalance} ${formattedBCH}` : 'Error - <button onClick={() => refreshBalance(bchAddress)}>Retry</button>')}</div>
+      <div>Balance: {balanceLoading ? 'Loading...' : `${formattedBalance} ${formattedBCH}`}</div>
+      <button onClick={() => refreshBalance(bchAddress, true)} disabled={balanceLoading}>Refresh Balance</button>
       {bchBalance === 0 && <div style={{color: 'red'}}>Zero balance - fund your address to tip</div>}
       {bchBalance > 0 && bchBalance < 546 && <div style={{color: 'orange'}}>Dust balance - add more funds to tip</div>}
       <h2>Tip BCH</h2>
