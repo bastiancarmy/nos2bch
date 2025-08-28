@@ -72,6 +72,17 @@ export async function getBCHBalance(address, forceRefresh = false, inSats = fals
   return 0;
 }
 
+async function refreshBalanceWithBackoff(address, attempt = 0) {
+  try {
+    return await refreshBalance(address);
+  } catch (err) {
+    if (attempt >= 5) throw err;
+    const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s, 8s, 16s
+    await new Promise(r => setTimeout(r, delay));
+    return refreshBalanceWithBackoff(address, attempt + 1);
+  }
+}
+
 let electrumClient = null;
 
 async function connectElectrum(retries = 3) {
