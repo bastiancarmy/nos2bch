@@ -32,18 +32,27 @@ function Popup() {
   const [copiedBCH, setCopiedBCH] = useState(false)
 
   useEffect(() => {
-    (async () => {
-      const results = await browser.storage.local.get(['private_key', `cached_balance_${bchAddress}`, 'hasRecentTx']);
-      // ... set privKey, npub, address ...
-
-      const cacheKey = `cached_balance_${address}`;
-      if (results[cacheKey] && Date.now() - results[cacheKey].timestamp < 300000 && !results.hasRecentTx) {
-        setBchBalance(results[cacheKey].balance);
-        setBalanceLoading(false);
-      } else {
-        refreshBalance(address, true); // Force if old cache or tx
+    async function load() {
+      let {private_key: privKey, hasRecentTx} = await browser.storage.local.get(['private_key', 'hasRecentTx']);
+      if (privKey) {
+        setPrivKey(privKey);
+        const pub = getPublicKey(privKey);
+        setNpub(nip19.npubEncode(pub));
+        const derivedBchAddress = deriveBCHAddress(pub); // Local variable
+        setBchAddress(derivedBchAddress);
+  
+        const cacheKey = `cached_balance_${derivedBchAddress}`;
+        const results = await browser.storage.local.get(cacheKey);
+        if (results[cacheKey] && Date.now() - results[cacheKey].timestamp < 300000 && !hasRecentTx) {
+          setBchBalance(results[cacheKey].balance);
+          setBalanceLoading(false);
+        } else {
+          setBalanceLoading(true);
+          refreshBalance(derivedBchAddress, true); // Force if old cache or tx
+        }
       }
-    })();
+    }
+    load();
   }, []);
 
   async function refreshBalance(address, force = false) {
