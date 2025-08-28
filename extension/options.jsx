@@ -24,7 +24,7 @@ function Options() {
   let [privKeyInput, setPrivKeyInput] = useState('')
   let [askPassword, setAskPassword] = useState(null)
   let [password, setPassword] = useState('')
-  let [policies, setPermissions] = useState([])
+  let [policies, setPolicies] = useState([])
   let [protocolHandler, setProtocolHandler] = useState('https://njump.me/{raw}')
   let [hidingPrivateKey, hidePrivateKey] = useState(true)
   let [showNotifications, setNotifications] = useState(false)
@@ -37,6 +37,7 @@ function Options() {
   let [txHistory, setTxHistory] = useState([])
   let [loading, setLoading] = useState(true)
   let [balanceLoading, setBalanceLoading] = useState(false)
+  
   const showMessage = msg => {
     setMessages(messages => [...messages, msg])
   }
@@ -49,7 +50,7 @@ function Options() {
   }, [messages, setMessages])
   useEffect(() => {
     (async () => {
-      const results = await browser.storage.local.get(['private_key', 'protocol_handler', 'notifications', 'lastBchBalance', 'lastBchBalanceTime']);
+      const results = await browser.storage.local.get(['private_key', 'protocol_handler', 'notifications', 'lastBchBalance', 'lastBchBalanceTime', 'hasRecentTx']);
       console.log('Options storage loaded:', results);
       if (results.private_key) {
         let prvKey = results.private_key
@@ -60,7 +61,7 @@ function Options() {
           let pubHex = getPublicKey(prvKey)
           const address = await deriveBCHAddress(pubHex)
           setBchAddress(address)
-          if (results.lastBchBalanceTime && Date.now() - results.lastBchBalanceTime < 600000) {
+          if (results.lastBchBalanceTime && Date.now() - results.lastBchBalanceTime < 600000 && !results.hasRecentTx) {
             setBchBalance(results.lastBchBalance)
           } else {
             refreshBalance(address)
@@ -108,27 +109,18 @@ function Options() {
         })
       })
     })
-    setPermissions(list)
+    setPolicies(list)
   }
   async function refreshBalance(address) {
     if (!address) return
     setBalanceLoading(true)
     try {
-      let balanceBCH
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          balanceBCH = await getBCHBalance(address)
-          break
-        } catch (err) {
-          console.warn(`Balance fetch attempt ${attempt} failed:`, err)
-          if (attempt === 3) throw err
-        }
-      }
+      const balanceBCH = await getBCHBalance(address, true || (await browser.storage.local.get('hasRecentTx')).hasRecentTx); // Force or if tx
       const sats = Math.floor(balanceBCH * 100000000)
       setBchBalance(sats)
       browser.storage.local.set({lastBchBalance: sats, lastBchBalanceTime: Date.now()})
     } catch (err) {
-      setBchBalance(0)
+      setBchBalance(null)
       showMessage('Error loading balance: ' + err.message)
     } finally {
       setBalanceLoading(false)
