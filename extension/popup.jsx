@@ -1,4 +1,5 @@
-// extension/popup.jsx - Confirmed as provided (no changes needed)
+// extension/popup.jsx
+
 import {getPublicKey} from 'nostr-tools'
 import * as nip19 from 'nostr-tools/nip19'
 import {hexToBytes} from '@noble/hashes/utils'
@@ -6,7 +7,7 @@ import React, {useEffect, useState} from 'react'
 import {createRoot} from 'react-dom/client'
 import { QRCodeSVG } from 'qrcode.react'
 import browser from 'webextension-polyfill'
-import {deriveBCHAddress, getBCHBalance} from './common'
+import {deriveBCHAddress, refreshBalance} from './common'
 
 class ErrorBoundary extends React.Component {
   state = { hasError: false };
@@ -48,26 +49,20 @@ function Popup() {
           setBalanceLoading(false);
         } else {
           setBalanceLoading(true);
-          refreshBalance(derivedBchAddress, true); // Force if old cache or tx
+          try {
+            const sats = await refreshBalance(derivedBchAddress, true);
+            setBchBalance(sats);
+          } catch (err) {
+            setBchBalance(0);
+            setError('Error loading balance: ' + err.message);
+          } finally {
+            setBalanceLoading(false);
+          }
         }
       }
     }
     load();
   }, []);
-
-  async function refreshBalance(address, force = false) {
-    setBalanceLoading(true);
-    try {
-      const balanceBCH = await getBCHBalance(address, force || (await browser.storage.local.get('hasRecentTx')).hasRecentTx);
-      const sats = Math.floor(balanceBCH * 100000000);
-      setBchBalance(sats);
-    } catch (err) {
-      setBchBalance(0);
-      setError('Error loading balance: ' + err.message);
-    } finally {
-      setBalanceLoading(false);
-    }
-  }
 
   async function handleTip() {
     if (!recipientNpub.startsWith('npub1') || amountSat < 1000 || amountSat > bchBalance - 1000) {
@@ -88,7 +83,12 @@ function Popup() {
         setStatus(`Success! TxID: <a href="https://blockchair.com/bitcoin-cash/transaction/${response.txid}" target="_blank">${response.txid}</a>`)
         setRecipientNpub('')
         setAmountSat('')
-        refreshBalance(bchAddress) // Refresh after success
+        try {
+          const sats = await refreshBalance(bchAddress, true);
+          setBchBalance(sats);
+        } catch (err) {
+          setError('Tip succeeded but balance refresh failed: ' + err.message);
+        }
         setTimeout(() => setStatus(''), 5000) // Clear status after 5s
         await browser.storage.local.set({hasRecentTx: true}); // Set flag after tx
       } else if (response.error) {
@@ -133,7 +133,8 @@ function Popup() {
       )}
       <div>
         BCH Balance: {balanceLoading ? <span>Loading... <span className="spinner" /></span> :
-          (bchBalance !== null ? `${formattedBalance} ${formattedBCH ? `(${formattedBCH})` : ''}` : 'Error - <button onClick={() => refreshBalanceWithBackoff(bchAddress)}>Retry</button>')}
+          (bchBalance !== null ? `${formattedBalance} ${formattedBCH ? `(${formattedBCH})` : ''}` : 
+            <span>Error - <button onClick={async () => { setBalanceLoading(true); try { const sats = await refreshBalance(bchAddress, true); setBchBalance(sats); } catch (err) { setBchBalance(0); setError('Error: ' + err.message); } finally { setBalanceLoading(false); }}}>Retry</button></span>)}
         {bchBalance !== null && cachedTimestamp && <div>Last updated: {Math.floor((Date.now() - cachedTimestamp) / 60000)} min ago</div>}
       </div>
       <h2>Tip BCH</h2>
