@@ -10,6 +10,9 @@ function Prompt() {
   let [params, setParams] = useState(null)
   let [processing, setProcessing] = useState(false)
   let [result, setResult] = useState(null) // {success: true/false, txid or error}
+  let [success, setSuccess] = useState(false);
+  let [error, setError] = useState(false);
+  let [message, setMessage] = useState('');
 
   useEffect(() => {
     browser.runtime.sendMessage({getPrompt: true}).then(prompt => {
@@ -20,13 +23,21 @@ function Prompt() {
       }
     });
 
-    // Listen for result from background
-    browser.runtime.onMessage.addListener((msg) => {
+    const listener = (msg) => {
       if (msg.tipResult) {
-        setResult(msg.tipResult);
-        setTimeout(() => window.close(), 3000); // Auto-close after 3s
+        setProcessing(false);
+        if (msg.tipResult.txid) {
+          setSuccess(true); // Trigger green check/confetti UI
+          setMessage(`Tip sent! TxID: ${msg.tipResult.txid}`);
+          setTimeout(() => browser.windows.getCurrent().then(win => browser.windows.remove(win.id)), 3000); // Auto-close
+        } else {
+          setError(true);
+          setMessage(`Error: ${msg.tipResult.error}`);
+        }
       }
-    });
+    };
+    browser.runtime.onMessage.addListener(listener);
+    return () => browser.runtime.onMessage.removeListener(listener);
   }, []);
 
   function respond(accept, conditions = null) {
@@ -34,12 +45,12 @@ function Prompt() {
     setProcessing(true); // Don't close, show processing
   }
 
-  let message = `Allow ${host} to ${type}?`;
+  let initialMessage = `Allow ${host} to ${type}?`;
   let estFee = ' ~200 sats';
   let estChange = params?.amountSat ? `Change: ~${bchBalance - params.amountSat - 200} sats` : ''; // Placeholder
 
   if (type === 'tipBCH' && params) {
-    message = `Send ${params.amountSat} sats to ${params.recipientNpub}? Est fee:${estFee}. ${estChange}`;
+    initialMessage = `Send ${params.amountSat} sats to ${params.recipientNpub}? Est fee:${estFee}. ${estChange}`;
   }
 
   if (processing) {
@@ -55,7 +66,7 @@ function Prompt() {
 
   return (
     <div style={{padding: '10px'}}>
-      <div>{message}</div>
+      <div>{success || error ? message : initialMessage}</div>
       <button onClick={() => respond('true')}>Yes</button>
       <button onClick={() => respond('false')}>No</button>
       <button onClick={() => respond('forever')}>Always</button>
