@@ -380,11 +380,10 @@ async function performOperation(type, params) {
               console.log('Preimage for input ' + index + ': ', bytesToHex(preimage));
               const sighash = sha256(sha256(preimage));
               const sig = signSchnorr(sighash, skBytes); // 64-byte Schnorr sig
-              const sigWithType = concatBytes(sig, new Uint8Array([0x41])); // 65 bytes
-              
+            
               input.unlockingBytecode = concatBytes(
-                new Uint8Array([sigWithType.length]),
-                sigWithType,
+                new Uint8Array([sig.length]),
+                sig,
                 new Uint8Array([pubCompressed.length]),
                 pubCompressed
               );
