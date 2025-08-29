@@ -36,50 +36,69 @@ function shuffleArray(array) {
   return array.sort(() => Math.random() - 0.5);
 }
 
-export async function getBCHBalance(address, forceRefresh = false, inSats = false) {
-  address = address.toLowerCase();
-  const cacheKey = `cached_balance_${address}`;
-  const cached = await browser.storage.local.get(cacheKey);
-  const {hasRecentTx} = await browser.storage.local.get('hasRecentTx');
-  if (!forceRefresh && !hasRecentTx && cached[cacheKey] && Date.now() - cached[cacheKey].timestamp < 300000) { // 5 min cache, skip if recent tx
-    const totalSats = cached[cacheKey].balance;
-    return inSats ? totalSats : totalSats / 100000000;
-  }
+let activeQueries = 0;
+const MAX_CONCURRENT = 1;
 
-  const servers = shuffleArray([...ELECTRUM_SERVERS]).slice(0, 5); // Limit to 5 shuffled servers per call to avoid overload
-  for (let server of servers) {
-    for (let retry = 0; retry < 2; retry++) { // 2 retries per server
-      try {
-        const client = await connectElectrum(server); // Assuming connectElectrum accepts server object
-        const balancePromise = client.request('blockchain.scripthash.get_balance', addressToScripthash(address));
-        const balance = await Promise.race([balancePromise, new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), 10000))]); // Increased timeout to 10s
-        const totalSats = balance.confirmed + balance.unconfirmed;
-        await browser.storage.local.set({ 
-          [cacheKey]: { balance: totalSats, timestamp: Date.now() },
-          hasRecentTx: false // Reset tx flag on success
-        });
-        return inSats ? totalSats : totalSats / 100000000;
-      } catch (err) {
-        console.error(`Electrum balance fetch failed on ${server.host} (retry ${retry}):`, err);
+export async function getBCHBalance(address, forceRefresh = false, inSats = false) {
+  if (activeQueries >= MAX_CONCURRENT) {
+    await new Promise(r => setTimeout(r, 1000)); // Wait 1s if busy
+    return getBCHBalance(address, forceRefresh, inSats);
+  }
+  activeQueries++;
+  try {
+    address = address.toLowerCase();
+    const cacheKey = `cached_balance_${address}`;
+    const {hasRecentTx} = await browser.storage.local.get('hasRecentTx');
+    const cached = await browser.storage.local.get(cacheKey);
+    if (!forceRefresh && !hasRecentTx && cached[cacheKey] && Date.now() - cached[cacheKey].timestamp < 300000) { // 5 min cache, skip if recent tx
+      const totalSats = cached[cacheKey].balance;
+      return inSats ? totalSats : totalSats / 100000000;
+    }
+
+    const servers = shuffleArray([...ELECTRUM_SERVERS]).slice(0, 5); // Limit to 5 shuffled servers per call to avoid overload
+    for (let server of servers) {
+      for (let retry = 0; retry < 2; retry++) { // 2 retries per server
+        try {
+          const client = await connectElectrum(server); // Assuming connectElectrum accepts server object
+          const balancePromise = client.request('blockchain.scripthash.get_balance', addressToScripthash(address));
+          const balance = await Promise.race([balancePromise, new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), 10000))]); // Increased timeout to 10s
+          const totalSats = balance.confirmed + balance.unconfirmed;
+          await browser.storage.local.set({ 
+            [cacheKey]: { balance: totalSats, timestamp: Date.now() },
+            hasRecentTx: false // Reset tx flag on success
+          });
+          return inSats ? totalSats : totalSats / 100000000;
+        } catch (err) {
+          console.error(`Electrum balance fetch failed on ${server.host} (retry ${retry}):`, err);
+        }
       }
     }
+    // Fallback to cache if all fail (even if expired or tx pending)
+    if (cached[cacheKey]) {
+      const totalSats = cached[cacheKey].balance;
+      return inSats ? totalSats : totalSats / 100000000;
+    }
+    return 0;
+  } catch (err) {
+    throw err;
+  } finally {
+    activeQueries--;
   }
-  // Fallback to cache if all fail (even if expired or tx pending)
-  if (cached[cacheKey]) {
-    const totalSats = cached[cacheKey].balance;
-    return inSats ? totalSats : totalSats / 100000000;
-  }
-  return 0;
 }
 
-async function refreshBalanceWithBackoff(address, attempt = 0) {
+export async function refreshBalance(address, force = false) {
+  return refreshBalanceWithBackoff(address.toLowerCase(), force);
+}
+
+async function refreshBalanceWithBackoff(address, force, attempt = 0) {
   try {
-    return await refreshBalance(address);
+    const balanceBCH = await getBCHBalance(address, force || (await browser.storage.local.get('hasRecentTx')).hasRecentTx);
+    return Math.floor(balanceBCH * 100000000);
   } catch (err) {
     if (attempt >= 5) throw err;
-    const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s, 8s, 16s
+    const delay = Math.pow(2, attempt) * 1000;
     await new Promise(r => setTimeout(r, delay));
-    return refreshBalanceWithBackoff(address, attempt + 1);
+    return refreshBalanceWithBackoff(address, force, attempt + 1);
   }
 }
 
