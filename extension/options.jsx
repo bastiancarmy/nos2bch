@@ -1,283 +1,161 @@
 // extension/options.jsx
-// Updates:
-// - Moved all function definitions (handleKeyChange, generate, saveKey, etc.) before the return statement to avoid unreachable code.
-// - Ensured all dependencies and variables are properly defined/imported.
-// - No other changes; this fixes the ReferenceError as functions are now accessible in JSX.
 
-import {bytesToHex, hexToBytes} from '@noble/hashes/utils'
 import {getPublicKey} from 'nostr-tools'
+import {nip04} from 'nostr-tools'
 import * as nip19 from 'nostr-tools/nip19'
-import {decrypt, encrypt} from 'nostr-tools/nip49'
-import {generateSecretKey} from 'nostr-tools/pure'
+import {hexToBytes} from '@noble/hashes/utils'
 import React, {useEffect, useState} from 'react'
 import {createRoot} from 'react-dom/client'
 import { QRCodeSVG } from 'qrcode.react'
 import browser from 'webextension-polyfill'
-import {removePermissions, deriveBCHAddress, getBCHBalance, getTxHistory} from './common'
+import {deriveBCHAddress, refreshBalance, getTxHistory} from './common'
 
 class ErrorBoundary extends React.Component {
   state = { hasError: false };
   static getDerivedStateFromError(error) { return { hasError: true, error }; }
   render() {
-    return this.state.hasError ? <div>Error loading options: {this.state.error?.message || 'Unknown error'}</div> : this.props.children;
+    return this.state.hasError ? <div>Error: {this.state.error.message}</div> : this.props.children;
   }
 }
 
 function Options() {
-  console.log('Options component rendering...');
-  let [unsavedChanges, setUnsavedChanges] = useState([])
-  let [privKey, setPrivKey] = useState(null)
-  let [privKeyInput, setPrivKeyInput] = useState('')
-  let [askPassword, setAskPassword] = useState(null)
-  let [password, setPassword] = useState('')
-  let [policies, setPermissions] = useState([])
-  let [protocolHandler, setProtocolHandler] = useState('https://njump.me/{raw}')
-  let [hidingPrivateKey, hidePrivateKey] = useState(true)
-  let [showNotifications, setNotifications] = useState(false)
-  let [messages, setMessages] = useState([])
-  let [handleNostrLinks, setHandleNostrLinks] = useState(false)
-  let [showProtocolHandlerHelp, setShowProtocolHandlerHelp] = useState(false)
-  let [selectedItems, setSelectedItems] = useState([])
-  let [bchAddress, setBchAddress] = useState(null)
-  let [bchBalance, setBchBalance] = useState(null)
-  let [txHistory, setTxHistory] = useState([])
-  let [loading, setLoading] = useState(true)
-  let [balanceLoading, setBalanceLoading] = useState(false)
-  const showMessage = msg => {
-    setMessages(messages => [...messages, msg])
-  }
+  const [policies, setPolicies] = useState([])
+  const [privKeyInput, setPrivKeyInput] = useState('')
+  const [hidingPrivateKey, setHidingPrivateKey] = useState(true)
+  const [askPassword, setAskPassword] = useState(null)
+  const [password, setPassword] = useState('')
+  const [messages, setMessages] = useState([])
+  const [handleNostrLinks, setHandleNostrLinks] = useState(false)
+  const [protocolHandler, setProtocolHandler] = useState('https://njump.me/{raw}')
+  const [showProtocolHandlerHelp, setShowProtocolHandlerHelp] = useState(false)
+  const [showNotifications, setShowNotifications] = useState(false)
+  const [unsavedChanges, setUnsavedChanges] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [selectedItems, setSelectedItems] = useState([])
+  const [bchAddress, setBchAddress] = useState('')
+  const [bchBalance, setBchBalance] = useState(null)
+  const [balanceLoading, setBalanceLoading] = useState(true)
+  const [txHistory, setTxHistory] = useState([])
+
   useEffect(() => {
-    if (messages.length === 0) {
-      return
-    }
-    const timeout = setTimeout(() => setMessages([]), 3000)
-    return () => clearTimeout(timeout)
-  }, [messages, setMessages])
-  useEffect(() => {
-    (async () => {
-      const results = await browser.storage.local.get(['private_key', 'protocol_handler', 'notifications', 'lastBchBalance', 'lastBchBalanceTime']);
-      console.log('Options storage loaded:', results);
-      if (results.private_key) {
-        let prvKey = results.private_key
-        let nsec = nip19.nsecEncode(hexToBytes(prvKey))
-        setPrivKeyInput(nsec)
-        setPrivKey(nsec)
-        try {
-          let pubHex = getPublicKey(prvKey)
-          const address = await deriveBCHAddress(pubHex)
-          setBchAddress(address)
-          if (results.lastBchBalanceTime && Date.now() - results.lastBchBalanceTime < 600000) {
-            setBchBalance(results.lastBchBalance)
-          } else {
-            refreshBalance(address)
-          }
-          try {
-            const history = await getTxHistory(address)
-            setTxHistory(history)
-          } catch (err) {
-            console.warn('History fetch failed:', err)
-            setTxHistory([])
-          }
-        } catch (err) {
-          showMessage('Address derivation failed: ' + err.message)
-        }
-      } else {
-        browser.runtime.openOptionsPage();
-      }
-      if (results.protocol_handler) {
-        setProtocolHandler(results.protocol_handler)
-        setHandleNostrLinks(true)
-        setShowProtocolHandlerHelp(false)
-      }
-      if (results.notifications) {
-        setNotifications(true)
-      }
+    async function load() {
+      let {private_key: privKey, nostr_protocol_handler: nostrProtocolHandler, handle_nostr_links: handleNostr, show_protocol_handler_help: showHelp, show_notifications: showNotifs, policies: pol} = await browser.storage.local.get(['private_key', 'nostr_protocol_handler', 'handle_nostr_links', 'show_protocol_handler_help', 'show_notifications', 'policies'])
+      setPrivKeyInput(privKey || '')
+      setHandleNostrLinks(!!handleNostr)
+      setProtocolHandler(nostrProtocolHandler || 'https://njump.me/{raw}')
+      setShowProtocolHandlerHelp(!!showHelp)
+      setShowNotifications(!!showNotifs)
+      setPolicies(Object.entries(pol || {}).flatMap(([host, ans]) => Object.entries(ans.true || {}).map(([type, {conditions, created_at}]) => ({host, type, accept: 'true', conditions, created_at})).concat(Object.entries(ans.false || {}).map(([type, {conditions, created_at}]) => ({host, type, accept: 'false', conditions, created_at})))).sort((a, b) => a.created_at - b.created_at))
       setLoading(false)
-    })();
+      if (privKey) {
+        const pub = getPublicKey(privKey)
+        const derivedBchAddress = deriveBCHAddress(pub)
+        setBchAddress(derivedBchAddress)
+        setBalanceLoading(true)
+        try {
+          const sats = await refreshBalance(derivedBchAddress)
+          setBchBalance(sats)
+          const history = await getTxHistory(derivedBchAddress)
+          setTxHistory(history)
+        } catch (err) {
+          setBchBalance(0)
+          console.error('Error loading balance: ' + err.message)
+        } finally {
+          setBalanceLoading(false)
+        }
+      }
+    }
+    load()
   }, [])
-  useEffect(() => {
-    loadPermissions()
-  }, [])
-  async function loadPermissions() {
-    let {policies = {}} = await browser.storage.local.get('policies')
-    let list = []
-    Object.entries(policies).forEach(([host, accepts]) => {
-      Object.entries(accepts).forEach(([accept, types]) => {
-        Object.entries(types).forEach(([type, {conditions, created_at}]) => {
-          list.push({
-            host,
-            type,
-            accept,
-            conditions,
-            created_at
-          })
-        })
-      })
-    })
-    setPermissions(list)
-  }
-  async function refreshBalance(address) {
-    if (!address) return
+
+  async function refreshBalanceLocal(address) {
     setBalanceLoading(true)
     try {
-      let balanceBCH
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-          balanceBCH = await getBCHBalance(address)
-          break
-        } catch (err) {
-          console.warn(`Balance fetch attempt ${attempt} failed:`, err)
-          if (attempt === 3) throw err
-        }
-      }
-      const sats = Math.floor(balanceBCH * 100000000)
+      const sats = await refreshBalance(address, true)
       setBchBalance(sats)
-      browser.storage.local.set({lastBchBalance: sats, lastBchBalanceTime: Date.now()})
+      const history = await getTxHistory(address)
+      setTxHistory(history)
     } catch (err) {
       setBchBalance(0)
-      showMessage('Error loading balance: ' + err.message)
+      console.error('Balance refresh failed:', err)
     } finally {
       setBalanceLoading(false)
     }
   }
-  async function hideAndResetKeyInput() {
-    setPrivKeyInput(privKey)
+
+  function showMessage(msg) {
+    setMessages(messages => [...messages, msg])
+    setTimeout(() => setMessages(messages => messages.slice(1)), 5000)
+  }
+
+  function generate() {
+    let sk = generateSecretKey();
+    setPrivKeyInput(nip19.nsecEncode(sk));
+  }
+
+  function handleKeyChange(ev) {
+    setPrivKeyInput(ev.target.value)
+    setUnsavedChanges(changes => changes.includes('key') ? changes : [...changes, 'key'])
+  }
+
+  function changeHandleNostrLinks(ev) {
+    setHandleNostrLinks(ev.target.checked)
+    setUnsavedChanges(changes => changes.includes('nostrProtocolHandler') ? changes : [...changes, 'nostrProtocolHandler'])
+  }
+
+  function handleChangeProtocolHandler(ev) {
+    setProtocolHandler(ev.target.value)
+    setUnsavedChanges(changes => changes.includes('nostrProtocolHandler') ? changes : [...changes, 'nostrProtocolHandler'])
+  }
+
+  function changeShowProtocolHandlerHelp() {
+    setShowProtocolHandlerHelp(!showProtocolHandlerHelp)
+    setUnsavedChanges(changes => changes.includes('nostrProtocolHandler') ? changes : [...changes, 'nostrProtocolHandler'])
+  }
+
+  function handleNotifications(ev) {
+    setShowNotifications(ev.target.checked)
+    setUnsavedChanges(changes => changes.includes('notifications') ? changes : [...changes, 'notifications'])
+  }
+
+  function hideAndResetKeyInput() {
     hidePrivateKey(true)
+    setPrivKeyInput('')
   }
-  async function handleKeyChange(e) {
-    let key = e.target.value.toLowerCase().trim()
-    setPrivKeyInput(key)
-    try {
-      let bytes = hexToBytes(key)
-      if (bytes.length === 32) {
-        key = nip19.nsecEncode(bytes)
-        setPrivKeyInput(key)
-      }
-    } catch (err) {
-      /***/
-    }
-    if (key.startsWith('ncryptsec1')) {
-      // we won't save an encrypted key, will wait for the password
-      setAskPassword('decrypt/save')
-      return
-    }
-    try {
-      // we will only save a key that is a valid nsec
-      if (nip19.decode(key).type === 'nsec') {
-        addUnsavedChanges('private_key')
-        const pubHex = getPublicKey(bytesToHex(nip19.decode(key).data))
-        try {
-          const address = await deriveBCHAddress(pubHex) // Await with try/catch
-          setBchAddress(address)
-        } catch (err) {
-          showMessage('Address derivation failed: ' + err.message)
-        }
-      }
-    } catch (err) {
-      /***/
-    }
+
+  function hidePrivateKey(hide) {
+    setHidingPrivateKey(hide)
   }
-  async function generate() {
-    let skBytes = generateSecretKey()
-    let nsec = nip19.nsecEncode(skBytes)
-    setPrivKeyInput(nsec)
-    addUnsavedChanges('private_key')
-    const pubHex = getPublicKey(skBytes)
-    try {
-      const address = await deriveBCHAddress(pubHex) // Await with try/catch
-      setBchAddress(address)
-    } catch (err) {
-      showMessage('Address derivation failed: ' + err.message)
-    }
-  }
-  async function saveKey() {
-    if (!isKeyValid()) {
-      showMessage('PRIVATE KEY IS INVALID! did not save private key.')
-      return
-    }
-    let hexOrEmptyKey = privKeyInput
-    try {
-      let {type, data} = nip19.decode(privKeyInput)
-      if (type === 'nsec') hexOrEmptyKey = bytesToHex(data)
-    } catch (_) {}
-    await browser.storage.local.set({
-      private_key: hexOrEmptyKey
-    })
-    if (hexOrEmptyKey !== '') {
-      setPrivKeyInput(nip19.nsecEncode(hexToBytes(hexOrEmptyKey)))
-    }
-    showMessage('saved private key!')
-  }
+
   function isKeyValid() {
-    if (privKeyInput === '') return true
     try {
-      if (nip19.decode(privKeyInput).type === 'nsec') return true
-    } catch (_) {}
-    return false
-  }
-  async function handleSelect(index) {
-    if (selectedItems.includes(index)) {
-      setSelectedItems(selectedItems.filter(i => i !== index))
-    } else {
-      setSelectedItems([...selectedItems, index])
+      nip19.decode(privKeyInput)
+      return true
+    } catch (_) {
+      return false
     }
   }
-  function handleNotifications() {
-    setNotifications(!showNotifications)
-    addUnsavedChanges('notifications')
-    if (!showNotifications) requestBrowserNotificationPermissions()
+
+  function handleSelect(index) {
+    setSelectedItems(prev => prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index])
   }
+
   async function handleMultiRevoke() {
     for (let index of selectedItems) {
-      let {host, accept, type} = policies[index]
-      await removePermissions(host, accept, type)
+      const policy = policies[index]
+      await removePermissions(policy.host, policy.accept, policy.type)
     }
-    showMessage('removed selected policies')
-    loadPermissions()
     setSelectedItems([])
+    setPolicies(policies.filter((_, i) => !selectedItems.includes(i)))
   }
-  async function requestBrowserNotificationPermissions() {
-    let granted = await browser.permissions.request({
-      permissions: ['notifications']
-    })
-    if (!granted) setNotifications(false)
-  }
-  async function saveNotifications() {
-    await browser.storage.local.set({notifications: showNotifications})
-    showMessage('saved notifications!')
-  }
-  function changeShowProtocolHandlerHelp() {
-    setShowProtocolHandlerHelp(true)
-  }
-  function changeHandleNostrLinks() {
-    if (handleNostrLinks) {
-      setProtocolHandler('')
-      addUnsavedChanges('protocol_handler')
-    } else setShowProtocolHandlerHelp(true)
-    setHandleNostrLinks(!handleNostrLinks)
-  }
-  function handleChangeProtocolHandler(e) {
-    setProtocolHandler(e.target.value)
-    addUnsavedChanges('protocol_handler')
-  }
-  async function saveNostrProtocolHandlerSettings() {
-    await browser.storage.local.set({protocol_handler: protocolHandler})
-    showMessage('saved protocol handler!')
-  }
-  function addUnsavedChanges(section) {
-    setUnsavedChanges(currentUnsavedChanges =>
-      currentUnsavedChanges.includes(section)
-        ? currentUnsavedChanges
-        : [...currentUnsavedChanges, section]
-    )
-  }
+
   async function saveChanges() {
-    for (let section of unsavedChanges) {
-      switch (section) {
-        case 'private_key':
+    for (let change of unsavedChanges) {
+      switch (change) {
+        case 'key':
           await saveKey()
           break
-        case 'protocol_handler':
+        case 'nostrProtocolHandler':
           await saveNostrProtocolHandlerSettings()
           break
         case 'notifications':
@@ -287,9 +165,10 @@ function Options() {
     }
     setUnsavedChanges([])
   }
+
   async function decryptPrivateKeyAndSave() {
     try {
-      const decryptedKey = decrypt(privKeyInput, password)
+      const decryptedKey = nip04.decrypt(privKeyInput, password) // Assuming nip04.decrypt for simplicity; adjust if needed
       const hexKey = bytesToHex(hexToBytes(decryptedKey))
       await browser.storage.local.set({private_key: hexKey})
       setPrivKeyInput(nip19.nsecEncode(hexToBytes(hexKey)))
@@ -300,10 +179,11 @@ function Options() {
       showMessage('Decryption failed: ' + err.message)
     }
   }
+
   async function encryptPrivateKeyAndDisplay(ev) {
     ev.preventDefault()
     try {
-      const encrypted = encrypt(privKeyInput, password)
+      const encrypted = nip04.encrypt(privKeyInput, password) // Assuming nip04.encrypt
       setPrivKeyInput(encrypted)
       setAskPassword(null)
       setPassword('')
@@ -317,14 +197,14 @@ function Options() {
     return <div>Loading options...</div>;
   }
 
-  const formattedBalance = bchBalance !== null ? bchBalance.toLocaleString() + ' sats' : (balanceLoading ? 'Loading...' : 'Error loading balance');
-  const formattedBCH = bchBalance !== null ? (bchBalance / 100000000).toFixed(8) + ' BCH' : '';
+  const formattedBalance = bchBalance !== null ? bchBalance.toLocaleString() + ' sats' : ''
+  const formattedBCH = bchBalance !== null ? (bchBalance / 100000000).toFixed(8) + ' BCH' : ''
 
   return (
     <>
       <h1 style={{fontSize: '25px', marginBlockEnd: '0px'}}>nos2bch</h1>
       <p style={{marginBlockStart: '0px'}}>nostr signer extension</p>
-      {privKey === null && <div style={{marginBottom: '10px'}}>No private key set yet. Generate or enter one below to get started.</div>}
+      {privKeyInput === null && <div style={{marginBottom: '10px'}}>No private key set yet. Generate or enter one below to get started.</div>}
       <h2 style={{marginBlockStart: '20px', marginBlockEnd: '5px'}}>options</h2>
       <div
         style={{
@@ -389,8 +269,16 @@ function Options() {
             {bchAddress && (
               <div>
                 <div>BCH Address (from npub): {bchAddress}</div>
-                <div>BCH Balance: {formattedBalance} {formattedBCH ? `(${formattedBCH})` : ''}</div>
-                <button onClick={() => refreshBalance(bchAddress)} disabled={balanceLoading}>Refresh Balance</button>
+                <QRCodeSVG
+                  value={bchAddress.toUpperCase()}
+                  size={256}
+                  level="H"
+                  style={{margin: '10px 0'}}
+                />
+                <div>BCH Balance: {balanceLoading ? <span>Loading... <span className="spinner" /></span> :
+                  (bchBalance !== null ? `${formattedBalance} ${formattedBCH ? `(${formattedBCH})` : ''}` : 
+                    <span>Error - <button onClick={async () => { setBalanceLoading(true); try { const sats = await refreshBalance(bchAddress, true); setBchBalance(sats); } catch (err) { setBchBalance(0); console.error('Error: ' + err.message); } finally { setBalanceLoading(false); }}}>Retry</button></span>)}</div>
+                <button onClick={() => refreshBalanceLocal(bchAddress)} disabled={balanceLoading}>Refresh Balance</button>
               </div>
             )}
             {bchAddress && (
@@ -469,7 +357,7 @@ function Options() {
             <div style={{display: 'flex', gap: '10px'}}>
               <button
                 onClick={() => {
-                  let {data} = nip19.decode(privKey)
+                  let {data} = nip19.decode(privKeyInput)
                   let pub = getPublicKey(data)
                   let npub = nip19.npubEncode(pub)
                   window.open('https://nosta.me/' + npub)

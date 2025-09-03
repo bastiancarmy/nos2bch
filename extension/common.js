@@ -10,10 +10,97 @@ import { ElectrumClient } from '@electrum-cash/network'
 import { hexToBytes, bytesToHex } from '@noble/hashes/utils'
 
 const ELECTRUM_SERVERS = [
-  { host: 'electrum.imaginary.cash', port: 50002, protocol: 'ssl' },
   { host: 'cashnode.bch.ninja', port: 50002, protocol: 'ssl' },
-  { host: 'fulcrum.criptolayer.net', port: 50002, protocol: 'ssl' }
+  { host: 'fulcrum.criptolayer.net', port: 50002, protocol: 'ssl' },
+  { host: 'fulcrum.aglauck.com', port: 50002, protocol: 'ssl' },
+  { host: 'fulcrum.jettscythe.xyz', port: 50002, protocol: 'ssl' },
+  { host: 'bch.cyberbits.eu', port: 50002, protocol: 'ssl' },
+  { host: 'bch.reichster.de', port: 50002, protocol: 'ssl' },
+  { host: 'blackie.c3-soft.com', port: 50002, protocol: 'ssl' },
+  { host: 'fulcrum-cash.1209k.com', port: 50002, protocol: 'ssl' },
+  { host: 'electroncash.dk', port: 50002, protocol: 'ssl' },
+  { host: 'niblerino.com', port: 50002, protocol: 'ssl' },
+  { host: 'bch0.kister.net', port: 50002, protocol: 'ssl' },
+  { host: 'electrum.imaginary.cash', port: 50002, protocol: 'ssl' },
+  { host: 'bch.imaginary.cash', port: 50002, protocol: 'ssl' },
+  { host: 'bch.loping.net', port: 50002, protocol: 'ssl' },
+  { host: 'bch.aftrek.org', port: 50002, protocol: 'ssl' },
+  { host: 'bitcoincash.stackwallet.com', port: 50002, protocol: 'ssl' },
+  { host: 'bch.soul-dev.com', port: 50002, protocol: 'ssl' },
+  { host: 'electron.jochen-hoenicke.de', port: 51002, protocol: 'ssl' },
+  { host: 'bitcoincash.network', port: 50002, protocol: 'ssl' },
 ];
+
+// Helper to shuffle array for load balancing
+function shuffleArray(array) {
+  return array.sort(() => Math.random() - 0.5);
+}
+
+let activeQueries = 0;
+const MAX_CONCURRENT = 1;
+
+export async function getBCHBalance(address, forceRefresh = false, inSats = false) {
+  if (activeQueries >= MAX_CONCURRENT) {
+    await new Promise(r => setTimeout(r, 1000)); // Wait 1s if busy
+    return getBCHBalance(address, forceRefresh, inSats);
+  }
+  activeQueries++;
+  try {
+    address = address.toLowerCase();
+    const cacheKey = `cached_balance_${address}`;
+    const {hasRecentTx} = await browser.storage.local.get('hasRecentTx');
+    const cached = await browser.storage.local.get(cacheKey);
+    if (!forceRefresh && !hasRecentTx && cached[cacheKey] && Date.now() - cached[cacheKey].timestamp < 300000) { // 5 min cache, skip if recent tx
+      const totalSats = cached[cacheKey].balance;
+      return inSats ? totalSats : totalSats / 100000000;
+    }
+
+    const servers = shuffleArray([...ELECTRUM_SERVERS]).slice(0, 5); // Limit to 5 shuffled servers per call to avoid overload
+    for (let server of servers) {
+      for (let retry = 0; retry < 2; retry++) { // 2 retries per server
+        try {
+          const client = await connectElectrum(server); // Assuming connectElectrum accepts server object
+          const balancePromise = client.request('blockchain.scripthash.get_balance', addressToScripthash(address));
+          const balance = await Promise.race([balancePromise, new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), 10000))]); // Increased timeout to 10s
+          const totalSats = balance.confirmed + balance.unconfirmed;
+          await browser.storage.local.set({ 
+            [cacheKey]: { balance: totalSats, timestamp: Date.now() },
+            hasRecentTx: false // Reset tx flag on success
+          });
+          return inSats ? totalSats : totalSats / 100000000;
+        } catch (err) {
+          console.error(`Electrum balance fetch failed on ${server.host} (retry ${retry}):`, err);
+        }
+      }
+    }
+    // Fallback to cache if all fail (even if expired or tx pending)
+    if (cached[cacheKey]) {
+      const totalSats = cached[cacheKey].balance;
+      return inSats ? totalSats : totalSats / 100000000;
+    }
+    return 0;
+  } catch (err) {
+    throw err;
+  } finally {
+    activeQueries--;
+  }
+}
+
+export async function refreshBalance(address, force = false) {
+  return refreshBalanceWithBackoff(address.toLowerCase(), force);
+}
+
+async function refreshBalanceWithBackoff(address, force, attempt = 0) {
+  try {
+    const balanceBCH = await getBCHBalance(address, force || (await browser.storage.local.get('hasRecentTx')).hasRecentTx);
+    return Math.floor(balanceBCH * 100000000);
+  } catch (err) {
+    if (attempt >= 5) throw err;
+    const delay = Math.pow(2, attempt) * 1000;
+    await new Promise(r => setTimeout(r, delay));
+    return refreshBalanceWithBackoff(address, force, attempt + 1);
+  }
+}
 
 let electrumClient = null;
 
@@ -195,24 +282,6 @@ export function _encodeDer(r, s) {
   const sEnc = encodeInt(s);
   const totalLen = rEnc.length + sEnc.length;
   return new Uint8Array([0x30, totalLen, ...rEnc, ...sEnc]);
-}
-
-export async function getBCHBalance(address, inSats = false) {
-  address = address.toLowerCase();
-  const client = await connectElectrum();
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      const balance = await client.request('blockchain.scripthash.get_balance', addressToScripthash(address));
-      const totalSats = balance.confirmed + balance.unconfirmed;
-      return inSats ? totalSats : totalSats / 100000000;
-    } catch (err) {
-      console.error(`Electrum balance fetch attempt ${attempt} failed:`, err);
-      if (attempt === 3) {
-        console.error('Electrum balance fetch failed after retries:', err);
-        return 0;
-      }
-    }
-  }
 }
 
 export async function getTxHistory(address) {

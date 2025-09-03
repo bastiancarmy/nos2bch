@@ -1,7 +1,3 @@
-// extension/background.js
-
-// background.js
-
 import browser from 'webextension-polyfill'
 import {getPublicKey, finalizeEvent, verifyEvent} from 'nostr-tools/pure'
 import {nip04, nip19} from 'nostr-tools'
@@ -89,6 +85,9 @@ function acquirePromptMutex() {
 function releasePromptMutex() {
   promptMutex = false
 }
+
+let promptTabId = null; // Global to track prompt tab for sending result
+
 async function handleContentScriptMessage({type, params, host}) {
   if (NO_PERMISSIONS_REQUIRED[type]) {
     switch (type) {
@@ -154,18 +153,24 @@ async function handleContentScriptMessage({type, params, host}) {
           params: JSON.stringify(params),
           type
         })
-        if (sideEffectTypes.has(type)) {
-          const {top, left} = await getPosition(width, height)
+        if (sideEffectTypes.has(type) && host === 'nos2bch') {
+          // For extension-initiated tips, assume confirmed inline, perform directly
+          finalResult = await performOperation(type, params);
+          // No need for prompt window
+        } else if (sideEffectTypes.has(type)) {
+          const {top, left}= await getPosition(width, height)
+          let win = await browser.windows.create({
+            url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
+            type: 'popup',
+            width: width,
+            height: height,
+            top: top,
+            left: left
+          })
+          let tabs = await browser.tabs.query({ windowId: win.id });
+          promptTabId = tabs[0].id;
           let {accept, conditions} = await new Promise((resolve, reject) => {
             openPrompt = {resolve, reject}
-            browser.windows.create({
-              url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
-              type: 'popup',
-              width: width,
-              height: height,
-              top: top,
-              left: left
-            })
           })
           if (!accept) {
             releasePromptMutex()
@@ -178,23 +183,30 @@ async function handleContentScriptMessage({type, params, host}) {
           if (typeof finalResult === 'string') {
             qs.set('result', finalResult)
           }
-          const {top, left} = await getPosition(width, height)
+          const {top, left}= await getPosition(width, height)
+          let win = await browser.windows.create({
+            url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
+            type: 'popup',
+            width: width,
+            height: height,
+            top: top,
+            left: left
+          })
+          let tabs = await browser.tabs.query({ windowId: win.id });
+          promptTabId = tabs[0].id;
           let {accept, conditions} = await new Promise((resolve, reject) => {
             openPrompt = {resolve, reject}
-            browser.windows.create({
-              url: `${browser.runtime.getURL('prompt.html')}?${qs.toString()}`,
-              type: 'popup',
-              width: width,
-              height: height,
-              top: top,
-              left: left
-            })
           })
           if (!accept) {
             releasePromptMutex()
             return {error: {message: 'denied'}}
           }
           if (conditions) await updatePermission(host, type, accept, conditions)
+        }
+        // Send result to prompt tab if open
+        if (promptTabId) {
+          browser.tabs.sendMessage(promptTabId, { tipResult: finalResult });
+          promptTabId = null; // Reset
         }
       } catch (err) {
         releasePromptMutex()
@@ -269,6 +281,7 @@ async function performOperation(type, params) {
         });
       
         let attempts = 3;
+        let txid; // Store successful txid outside loop
         while (attempts > 0) {
           try {
             let feeRate;
@@ -367,11 +380,10 @@ async function performOperation(type, params) {
               console.log('Preimage for input ' + index + ': ', bytesToHex(preimage));
               const sighash = sha256(sha256(preimage));
               const sig = signSchnorr(sighash, skBytes); // 64-byte Schnorr sig
-              const sigWithType = concatBytes(sig, new Uint8Array([0x41])); // 65 bytes
-              
+            
               input.unlockingBytecode = concatBytes(
-                new Uint8Array([sigWithType.length]),
-                sigWithType,
+                new Uint8Array([sig.length]),
+                sig,
                 new Uint8Array([pubCompressed.length]),
                 pubCompressed
               );
@@ -382,7 +394,8 @@ async function performOperation(type, params) {
             const encodedTx = encodeTx(unsignedTx);
             const txHex = bytesToHex(encodedTx);
             console.log('Built txHex for broadcast:', txHex);
-            const txid = await broadcastTx(txHex);
+            txid = await broadcastTx(txHex); // Assign txid on success
+            console.log('Broadcast successful, txid:', txid);
       
             // If notify is true, send a Nostr kind:4 DM to the recipient
             if (notify) {
@@ -398,15 +411,32 @@ async function performOperation(type, params) {
               const signed = finalizeEvent(event, skHex);
               if (!verifyEvent(signed)) throw new Error('Failed to verify tipped notification event');
               console.log('Signed notification event:', JSON.stringify(signed, null, 2)); // Debug
-              const relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr.mom'];
+              const relays = ['wss://relay.damus.io', 'wss://nos.lol', 'wss://nostr-pub.wellorder.net'];
               for (const relay of relays) {
                 try {
                   await publishToRelay(relay, signed);
                   console.log(`Notification published to ${relay}`);
                 } catch (err) {
-                  console.warn(`Failed to publish to ${relay}:`, err);
+                  console.warn(`Failed to publish to ${relay}:`, err); // Warn but don't throw
                 }
               }
+            }
+      
+            // Wrap notifications in try-catch to prevent throw/retry on failure
+            try {
+              const hasPermission = await browser.permissions.contains({ permissions: ['notifications'] });
+              if (hasPermission) {
+                browser.notifications.create({
+                  type: 'basic',
+                  iconUrl: browser.runtime.getURL('icon-128.png'), // Assuming you have an icon
+                  title: 'Tip Sent Successfully!',
+                  message: `Sent ${amountSat} sats to ${recipientNpub}. TxID: ${txid}\nView: https://blockchair.com/bitcoin-cash/transaction/${txid}`
+                });
+              } else {
+                console.log('Notifications permission not granted; skipping system notification.');
+              }
+            } catch (notifErr) {
+              console.warn('System notification failed:', notifErr); // Log warning, continue
             }
       
             chrome.alarms.clear('tipKeepAlive');
@@ -549,3 +579,33 @@ function encodeTx(tx) {
 }
 
 console.log('Background script loaded successfully');
+
+// Background balance refresh alarm
+chrome.alarms.create('backgroundBalanceRefresh', { periodInMinutes: 10 });
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name === 'backgroundBalanceRefresh') {
+    const { private_key: privKey } = await browser.storage.local.get('private_key');
+    if (privKey) {
+      const pub = getPublicKey(privKey);
+      const bchAddress = deriveBCHAddress(pub);
+      const currentBalance = await getBCHBalance(bchAddress); // Uses cache internally if fresh
+      if (currentBalance !== null) {
+        // Compare with last known cache to detect change
+        const cached = await getCachedBalance();
+        if (cached !== currentBalance) {
+          browser.storage.local.set({ cachedBalance: { balance: currentBalance, timestamp: Date.now() } });
+          // Optional: Notify user of incoming funds
+          const hasPermission = await browser.permissions.contains({ permissions: ['notifications'] });
+          if (hasPermission) {
+            browser.notifications.create({
+              type: 'basic',
+              iconUrl: browser.runtime.getURL('icon-128.png'),
+              title: 'nos2bch: Balance Updated',
+              message: `Your BCH balance has changed to ${currentBalance} sats.`
+            });
+          }
+        }
+      }
+    }
+  }
+});
