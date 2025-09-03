@@ -1,6 +1,6 @@
 # nos2bch Chrome Extension
 
-nos2bch is a Chrome extension that bridges the Nostr protocol with Bitcoin Cash (BCH) for seamless on-chain tipping. This project is a fork of [nos2x](https =//github.com/fiatjaf/nos2x), extending its Nostr signing capabilities with BCH tipping functionality. In the Nostr ecosystem, which is heavily focused on Lightning Network for payments, nos2bch provides an alternative by enabling direct BCH transfers to Nostr public keys (npubs). It derives BCH addresses from npubs, allowing users to tip BCH without intermediaries, while optionally sending encrypted DM notifications via Nostr (kind 4 events).
+nos2bch is a Chrome extension that bridges the Nostr protocol with Bitcoin Cash (BCH) for seamless on-chain tipping. This project is a fork of [nos2x](https://github.com/fiatjaf/nos2x), extending its Nostr signing capabilities with BCH tipping functionality. In the Nostr ecosystem, which is heavily focused on Lightning Network for payments, nos2bch provides an alternative by enabling direct BCH transfers to Nostr public keys (npubs). It derives BCH addresses from npubs, allowing users to tip BCH without intermediaries, while optionally sending encrypted DM notifications via Nostr (kind 4 events).
 
 This extension also serves as a Nostr signer, supporting event signing and NIP-04/NIP-44 encryption/decryption, making it a versatile tool for Nostr users interested in BCH integration.
 
@@ -27,8 +27,7 @@ Key highlights:
   - Transaction Building: P2PKH scripts, dynamic input selection (up to 10 UTXOs), change output if above dust threshold (546 sats), fee estimation with caching (refreshed every 5 minutes).
   - Signing: Schnබ (64-byte) per input using `@noble/secp256k1` with custom RFC6979 nonce and additional data.
   - Broadcasting: Retries on failure, uses shuffled Electrum servers for reliability.
-  - Optional Notification: Sends a Nostr kind 4 veden
-  - 4 DM to the recipient with the tx link and extension promo, published to multiple relays (e.g., relay.damus.io, nos.lol).
+  - Optional Notification: Sends a Nostr kind 4 DM to the recipient with the tx link and extension promo, published to multiple relays (e.g., relay.damus.io, nos.lol).
 
 - **Balance & History**:
   - Cached balance refresh (every 5 minutes on access, background every 10 minutes via alarms).
